@@ -1,114 +1,202 @@
 from __future__ import annotations
 
-from typing import List, Dict, Any, Literal
-from pydantic import BaseModel, Field, conint
+from typing import Any, Dict, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-Score = conint(ge=0, le=10)
+TASK_NAME = "ui_hierarchy_evaluation"
+
+DIMENSION_ORDER = [
+    "visual_saliency_difference",
+    "grouping_compactness_separation",
+    "alignment_consistency",
+    "reading_flow_continuity",
+    "visual_noise",
+]
+
+DIMENSION_LABELS = {
+    "visual_saliency_difference": "视觉显著性差异",
+    "grouping_compactness_separation": "组内紧密与分离度",
+    "alignment_consistency": "对齐一致性",
+    "reading_flow_continuity": "阅读流连续性",
+    "visual_noise": "视觉干扰度",
+}
 
 
-class DimensionResult(BaseModel):
-    score: Score = Field(..., description="0-10分，10分最佳")
-    reason: str = Field(..., description="该维度评分理由，简明但具体")
-    evidence: List[str] = Field(default_factory=list, description="可观察到的界面证据点")
+class StrictBaseModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
-class OverallResult(BaseModel):
-    score: Score = Field(..., description="整体层次结构总分，0-10")
-    summary: str = Field(..., description="整体评价摘要")
-    strengths: List[str] = Field(default_factory=list)
-    weaknesses: List[str] = Field(default_factory=list)
-    suggestions: List[str] = Field(default_factory=list)
+class DimensionEvaluation(StrictBaseModel):
+    score: float = Field(
+        ...,
+        ge=1,
+        le=10,
+        description="Hierarchy dimension score on a 1-10 scale.",
+    )
+    judgment: str = Field(
+        ...,
+        min_length=8,
+        description="One-sentence judgment focused on hierarchy quality.",
+    )
+    evidence: list[str] = Field(
+        ...,
+        min_length=2,
+        max_length=3,
+        description="2-3 visible layout evidence points from the screenshot.",
+    )
+    suggestion: str = Field(
+        ...,
+        min_length=8,
+        description="One actionable hierarchy improvement for this dimension.",
+    )
+
+    @model_validator(mode="after")
+    def validate_text_fields(self) -> "DimensionEvaluation":
+        if any(not item.strip() for item in self.evidence):
+            raise ValueError("Evidence items must be non-empty strings.")
+        return self
 
 
-class UIHierarchyEvaluation(BaseModel):
-    task: Literal["ui_hierarchy_evaluation"] = "ui_hierarchy_evaluation"
-    image_name: str
-    dimensions: Dict[str, DimensionResult]
-    overall: OverallResult
+class HierarchyDimensions(StrictBaseModel):
+    visual_saliency_difference: DimensionEvaluation
+    grouping_compactness_separation: DimensionEvaluation
+    alignment_consistency: DimensionEvaluation
+    reading_flow_continuity: DimensionEvaluation
+    visual_noise: DimensionEvaluation
+
+
+class UIHierarchyEvaluation(StrictBaseModel):
+    task: Literal[TASK_NAME]
+    image_name: str = Field(..., min_length=1)
+    overall_score: float = Field(
+        ...,
+        ge=1,
+        le=10,
+        description="Overall hierarchy score. Prefer the mean of the five dimension scores.",
+    )
+    confidence: Literal["low", "medium", "high"]
+    dimensions: HierarchyDimensions
+    hierarchy_summary: str = Field(
+        ...,
+        min_length=20,
+        description="A synthesized summary across the five hierarchy dimensions.",
+    )
+    priority_improvements: list[str] = Field(
+        ...,
+        min_length=1,
+        max_length=3,
+        description="1-3 highest-priority improvements tied to low-scoring dimensions.",
+    )
+
+    @model_validator(mode="after")
+    def validate_priority_items(self) -> "UIHierarchyEvaluation":
+        if any(not item.strip() for item in self.priority_improvements):
+            raise ValueError("Priority improvements must be non-empty strings.")
+        return self
 
 
 def get_json_schema_dict() -> Dict[str, Any]:
-    """
-    给 Responses API 的 json_schema 使用。
-    """
     return {
-        "name": "ui_hierarchy_evaluation",
+        "name": TASK_NAME,
         "schema": {
             "type": "object",
             "additionalProperties": False,
             "properties": {
                 "task": {
                     "type": "string",
-                    "const": "ui_hierarchy_evaluation"
+                    "const": TASK_NAME,
                 },
-                "image_name": {"type": "string"},
+                "image_name": {
+                    "type": "string",
+                    "minLength": 1,
+                },
+                "overall_score": {
+                    "type": "number",
+                    "minimum": 1,
+                    "maximum": 10,
+                },
+                "confidence": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high"],
+                },
                 "dimensions": {
                     "type": "object",
                     "additionalProperties": False,
                     "properties": {
                         "visual_saliency_difference": {
-                            "$ref": "#/$defs/dimensionResult"
+                            "$ref": "#/$defs/dimensionEvaluation"
                         },
-                        "group_compactness_and_separation": {
-                            "$ref": "#/$defs/dimensionResult"
+                        "grouping_compactness_separation": {
+                            "$ref": "#/$defs/dimensionEvaluation"
                         },
                         "alignment_consistency": {
-                            "$ref": "#/$defs/dimensionResult"
+                            "$ref": "#/$defs/dimensionEvaluation"
                         },
                         "reading_flow_continuity": {
-                            "$ref": "#/$defs/dimensionResult"
+                            "$ref": "#/$defs/dimensionEvaluation"
                         },
                         "visual_noise": {
-                            "$ref": "#/$defs/dimensionResult"
-                        }
+                            "$ref": "#/$defs/dimensionEvaluation"
+                        },
                     },
-                    "required": [
-                        "visual_saliency_difference",
-                        "group_compactness_and_separation",
-                        "alignment_consistency",
-                        "reading_flow_continuity",
-                        "visual_noise"
-                    ]
+                    "required": DIMENSION_ORDER,
                 },
-                "overall": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "score": {"type": "integer", "minimum": 0, "maximum": 10},
-                        "summary": {"type": "string"},
-                        "strengths": {
-                            "type": "array",
-                            "items": {"type": "string"}
-                        },
-                        "weaknesses": {
-                            "type": "array",
-                            "items": {"type": "string"}
-                        },
-                        "suggestions": {
-                            "type": "array",
-                            "items": {"type": "string"}
-                        }
+                "hierarchy_summary": {
+                    "type": "string",
+                    "minLength": 20,
+                },
+                "priority_improvements": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 3,
+                    "items": {
+                        "type": "string",
+                        "minLength": 8,
                     },
-                    "required": ["score", "summary", "strengths", "weaknesses", "suggestions"]
-                }
+                },
             },
-            "required": ["task", "image_name", "dimensions", "overall"],
+            "required": [
+                "task",
+                "image_name",
+                "overall_score",
+                "confidence",
+                "dimensions",
+                "hierarchy_summary",
+                "priority_improvements",
+            ],
             "$defs": {
-                "dimensionResult": {
+                "dimensionEvaluation": {
                     "type": "object",
                     "additionalProperties": False,
                     "properties": {
-                        "score": {"type": "integer", "minimum": 0, "maximum": 10},
-                        "reason": {"type": "string"},
+                        "score": {
+                            "type": "number",
+                            "minimum": 1,
+                            "maximum": 10,
+                        },
+                        "judgment": {
+                            "type": "string",
+                            "minLength": 8,
+                        },
                         "evidence": {
                             "type": "array",
-                            "items": {"type": "string"}
-                        }
+                            "minItems": 2,
+                            "maxItems": 3,
+                            "items": {
+                                "type": "string",
+                                "minLength": 4,
+                            },
+                        },
+                        "suggestion": {
+                            "type": "string",
+                            "minLength": 8,
+                        },
                     },
-                    "required": ["score", "reason", "evidence"]
+                    "required": ["score", "judgment", "evidence", "suggestion"],
                 }
-            }
+            },
         },
-        "strict": True
+        "strict": True,
     }

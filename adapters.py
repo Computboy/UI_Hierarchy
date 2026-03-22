@@ -12,6 +12,9 @@ from prompts import SYSTEM_PROMPT, build_user_prompt
 from schemas import get_json_schema_dict
 
 
+JSON_SCHEMA = get_json_schema_dict()
+
+
 class MultimodalEvaluator(Protocol):
     def evaluate_image(self, image_path: str) -> str:
         ...
@@ -28,12 +31,14 @@ def encode_image_to_data_url(image_path: str) -> str:
     return f"data:{mime_type};base64,{base64_str}"
 
 
+def _require_text_output(raw_text: str | None, provider_name: str) -> str:
+    if raw_text and raw_text.strip():
+        return raw_text
+    raise ValueError(f"{provider_name} did not return any text output.")
+
+
 class OpenAIResponsesAdapter:
-    """
-    适用于 OpenAI 官方 Responses API。
-    很多 OpenAI 兼容平台未必支持 text.format/json_schema，
-    所以兼容性最强的仍然是官方接口。
-    """
+    """Use the official Responses API with strict JSON schema output."""
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -46,14 +51,12 @@ class OpenAIResponsesAdapter:
         image_name = Path(image_path).name
         data_url = encode_image_to_data_url(image_path)
 
-        resp = self.client.responses.create(
+        response = self.client.responses.create(
             model=self.settings.model,
             input=[
                 {
                     "role": "system",
-                    "content": [
-                        {"type": "input_text", "text": SYSTEM_PROMPT}
-                    ],
+                    "content": [{"type": "input_text", "text": SYSTEM_PROMPT}],
                 },
                 {
                     "role": "user",
@@ -66,22 +69,18 @@ class OpenAIResponsesAdapter:
             text={
                 "format": {
                     "type": "json_schema",
-                    "name": "ui_hierarchy_evaluation",
-                    "schema": get_json_schema_dict()["schema"],
+                    "name": JSON_SCHEMA["name"],
+                    "schema": JSON_SCHEMA["schema"],
                     "strict": True,
                 }
             },
         )
 
-        # 对于多数官方 SDK，这里可以直接取 output_text
-        return resp.output_text
+        return _require_text_output(getattr(response, "output_text", None), "Responses API")
 
 
 class OpenAICompatibleChatAdapter:
-    """
-    适用于许多 OpenAI-compatible 的 /chat/completions 多模态服务。
-    这类接口一般不一定支持严格 json_schema，因此用 prompt 约束 + 后解析校验。
-    """
+    """Use OpenAI-compatible chat completions with prompt-side JSON enforcement."""
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -96,7 +95,7 @@ class OpenAICompatibleChatAdapter:
 
         completion = self.client.chat.completions.create(
             model=self.settings.model,
-            temperature=0.2,
+            temperature=0.1,
             response_format={"type": "json_object"},
             messages=[
                 {
@@ -113,17 +112,17 @@ class OpenAICompatibleChatAdapter:
             ],
         )
 
-        return completion.choices[0].message.content
+        content = completion.choices[0].message.content
+        return _require_text_output(content, "Chat Completions API")
 
 
 def build_evaluator(settings: Settings) -> MultimodalEvaluator:
     provider = settings.provider.lower()
     if provider == "openai_responses":
         return OpenAIResponsesAdapter(settings)
-    elif provider == "openai_compatible_chat":
+    if provider == "openai_compatible_chat":
         return OpenAICompatibleChatAdapter(settings)
-    else:
-        raise ValueError(
-            f"不支持的 provider: {settings.provider}，"
-            f"可选: openai_responses | openai_compatible_chat"
-        )
+    raise ValueError(
+        f"Unsupported provider: {settings.provider}. "
+        "Expected one of: openai_responses | openai_compatible_chat"
+    )
