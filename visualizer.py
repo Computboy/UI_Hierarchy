@@ -22,14 +22,6 @@ matplotlib.rcParams["font.sans-serif"] = [
 matplotlib.rcParams["axes.unicode_minus"] = False
 
 
-CHART_LABELS = {
-    "visual_saliency_difference": "Saliency",
-    "grouping_compactness_separation": "Grouping",
-    "alignment_consistency": "Alignment",
-    "reading_flow_continuity": "Reading Flow",
-    "visual_noise": "Low Noise",
-}
-
 PAGE_BG = "#f3f6fa"
 CARD_BG = "#ffffff"
 CARD_BORDER = "#d9e2ec"
@@ -51,24 +43,20 @@ def get_dimension_items(result):
 
 
 def format_score(score: float) -> str:
-    if int(score) == score:
-        return str(int(score))
-    return f"{score:.1f}"
+    return str(int(score)) if int(score) == score else f"{score:.1f}"
 
 
 def wrap_text_lines(text: str, width: int) -> List[str]:
     if not text:
         return [""]
-
     lines: List[str] = []
     for paragraph in str(text).splitlines() or [""]:
-        wrapped = textwrap.wrap(paragraph, width=width) or [""]
-        lines.extend(wrapped)
+        lines.extend(textwrap.wrap(paragraph, width=width) or [""])
     return lines
 
 
 def wrap_labeled_text(label: str, text: str, width: int) -> List[str]:
-    prefix = f"{label}："
+    prefix = f"{label}: "
     return textwrap.wrap(
         f"{prefix}{text}",
         width=width,
@@ -86,9 +74,29 @@ def wrap_bullet_text(text: str, width: int) -> List[str]:
     ) or ["- "]
 
 
+def build_metric_lines(metrics, width: int) -> List[str]:
+    lines: List[str] = []
+    for metric in metrics:
+        method = {
+            "opencv": "OpenCV",
+            "multimodal_llm": "MLLM",
+            "heuristic_fallback": "Fallback",
+        }.get(metric.method, metric.method)
+        lines.extend(
+            wrap_bullet_text(
+                f"{metric.label} [{method}] {format_score(metric.normalized_score)}/10",
+                width,
+            )
+        )
+    return lines
+
+
 def build_dimension_detail_lines(dim, width: int) -> List[str]:
     lines: List[str] = []
     lines.extend(wrap_labeled_text("判断", dim.judgment, width))
+    lines.extend(wrap_labeled_text("子指标", "", width))
+    lines.extend(build_metric_lines(dim.metrics, width))
+    lines.extend(wrap_labeled_text("证据", "", width))
     for evidence in dim.evidence:
         lines.extend(wrap_bullet_text(evidence, width))
     lines.extend(wrap_labeled_text("建议", dim.suggestion, width))
@@ -122,15 +130,14 @@ def make_round_box(
 
 def plot_bar_chart(result, save_path: str) -> None:
     dim_items = get_dimension_items(result)
-    labels = [CHART_LABELS.get(key, key) for key, _ in dim_items]
+    labels = [DIMENSION_LABELS.get(key, key) for key, _ in dim_items]
     scores = [dim.score for _, dim in dim_items]
 
-    plt.figure(figsize=(10, 5), facecolor="white")
-    bars = plt.bar(labels, scores, color="#8eb8d1", edgecolor="#537895", linewidth=1)
+    plt.figure(figsize=(9, 5), facecolor="white")
+    bars = plt.bar(labels, scores, color="#8eb8d1", edgecolor="#537895", linewidth=1.2)
     plt.ylim(0, 10)
     plt.ylabel("Score (0-10)")
     plt.title(f"UI Hierarchy Evaluation - {result.image_name}")
-    plt.xticks(rotation=15)
     plt.grid(axis="y", linestyle="--", alpha=0.25)
 
     for bar, score in zip(bars, scores):
@@ -153,11 +160,19 @@ def plot_bar_chart(result, save_path: str) -> None:
 def create_summary_card(result, original_image_path: str, save_path: str) -> None:
     image = Image.open(original_image_path).convert("RGB")
 
-    overview_lines = [
-        f"Image Name: {result.image_name}",
-        f"Overall Score: {format_score(result.overall_score)} / 10",
-        f"Confidence: {result.confidence}",
-    ]
+    overview_lines: List[str] = []
+    overview_lines.extend(wrap_labeled_text("Image", result.image_name, 54))
+    overview_lines.extend(wrap_labeled_text("Overall", f"{format_score(result.overall_score)} / 10", 54))
+    overview_lines.extend(wrap_labeled_text("Confidence", result.confidence, 54))
+    overview_lines.extend(
+        wrap_labeled_text(
+            "Detection",
+            f"{result.detection_summary.detected_elements} elements / {result.detection_summary.detected_groups} groups",
+            54,
+        )
+    )
+    overview_lines.extend(wrap_labeled_text("LLM", result.detection_summary.llm_status, 54))
+    overview_lines.extend(wrap_labeled_text("Method", result.method_summary, 54))
 
     dimension_blocks = []
     for key, dim in get_dimension_items(result):
@@ -165,15 +180,14 @@ def create_summary_card(result, original_image_path: str, save_path: str) -> Non
             {
                 "label": DIMENSION_LABELS.get(key, key),
                 "score": format_score(dim.score),
-                "lines": build_dimension_detail_lines(dim, width=46),
+                "lines": build_dimension_detail_lines(dim, width=48),
             }
         )
 
-    summary_lines = wrap_text_lines(result.hierarchy_summary, width=49)
-
+    summary_lines = wrap_text_lines(result.hierarchy_summary, width=54)
     priority_lines: List[str] = []
     for item in result.priority_improvements:
-        priority_lines.extend(wrap_bullet_text(item, width=49))
+        priority_lines.extend(wrap_bullet_text(item, width=54))
 
     section_title_height = 0.04
     section_line_height = 0.028
@@ -199,21 +213,20 @@ def create_summary_card(result, original_image_path: str, save_path: str) -> Non
 
     dimension_heights = []
     for block in dimension_blocks:
-        height = (
+        dimension_heights.append(
             dimension_top_pad
             + dimension_title_height
             + dimension_header_gap
             + len(block["lines"]) * dimension_line_height
             + dimension_bottom_pad
         )
-        dimension_heights.append(height)
 
     dimensions_height = (
         section_top_pad
         + section_title_height
         + 0.03
         + sum(dimension_heights)
-        + dimension_gap * (len(dimension_heights) - 1)
+        + dimension_gap * max(0, len(dimension_heights) - 1)
         + section_bottom_pad
     )
 
@@ -224,7 +237,6 @@ def create_summary_card(result, original_image_path: str, save_path: str) -> Non
         + len(summary_lines) * section_line_height
         + section_bottom_pad
     )
-
     priority_height = (
         section_top_pad
         + section_title_height
@@ -233,10 +245,8 @@ def create_summary_card(result, original_image_path: str, save_path: str) -> Non
         + section_bottom_pad
     )
 
-    panel_top_margin = 0.02
-    panel_bottom_margin = 0.02
     panel_height = (
-        panel_top_margin
+        0.02
         + overview_height
         + section_gap
         + dimensions_height
@@ -244,17 +254,17 @@ def create_summary_card(result, original_image_path: str, save_path: str) -> Non
         + summary_height
         + section_gap
         + priority_height
-        + panel_bottom_margin
+        + 0.02
     )
 
-    fig = plt.figure(figsize=(16, max(11.5, 8.2 * panel_height)), facecolor=PAGE_BG)
+    fig = plt.figure(figsize=(16, max(11.5, 8.0 * panel_height)), facecolor=PAGE_BG)
     fig.text(
         0.5,
         0.975,
-        "UI Hierarchy Evaluation Report",
+        "UI Hierarchy Hybrid Evaluation Report",
         ha="center",
         va="top",
-        fontsize=28,
+        fontsize=26,
         fontweight="bold",
         color=TITLE_COLOR,
     )
@@ -276,12 +286,7 @@ def create_summary_card(result, original_image_path: str, save_path: str) -> Non
     ax_panel.set_ylim(0, panel_height)
     ax_panel.axis("off")
 
-    def draw_section_card(
-        title: str,
-        lines: List[str],
-        y_top: float,
-        height: float,
-    ) -> float:
+    def draw_section_card(title: str, lines: List[str], y_top: float, height: float) -> float:
         y_bottom = y_top - height
         make_round_box(ax_panel, 0.02, y_bottom, 0.96, height)
         ax_panel.text(
@@ -298,7 +303,7 @@ def create_summary_card(result, original_image_path: str, save_path: str) -> Non
             0.04,
             y_top - 0.075,
             "\n".join(lines),
-            fontsize=11.5,
+            fontsize=11.2,
             color=TEXT_COLOR,
             ha="left",
             va="top",
@@ -306,8 +311,7 @@ def create_summary_card(result, original_image_path: str, save_path: str) -> Non
         )
         return y_bottom
 
-    current_y = panel_height - panel_top_margin
-
+    current_y = panel_height - 0.02
     current_y = draw_section_card("Overview", overview_lines, current_y, overview_height) - section_gap
 
     dimensions_top = current_y
@@ -316,7 +320,7 @@ def create_summary_card(result, original_image_path: str, save_path: str) -> Non
     ax_panel.text(
         0.04,
         dimensions_top - 0.035,
-        "Five Dimension Scores",
+        "Three Dimension Scores",
         fontsize=16,
         fontweight="bold",
         color=TITLE_COLOR,
@@ -360,7 +364,7 @@ def create_summary_card(result, original_image_path: str, save_path: str) -> Non
             0.07,
             dimension_y - 0.06,
             "\n".join(block["lines"]),
-            fontsize=10.4,
+            fontsize=10.2,
             color=TEXT_COLOR,
             ha="left",
             va="top",
@@ -369,9 +373,7 @@ def create_summary_card(result, original_image_path: str, save_path: str) -> Non
         dimension_y = block_bottom - dimension_gap
 
     current_y = dimensions_bottom - section_gap
-    current_y = (
-        draw_section_card("Hierarchy Summary", summary_lines, current_y, summary_height) - section_gap
-    )
+    current_y = draw_section_card("Hierarchy Summary", summary_lines, current_y, summary_height) - section_gap
     draw_section_card("Priority Improvements", priority_lines, current_y, priority_height)
 
     plt.savefig(save_path, dpi=220, bbox_inches="tight", facecolor=PAGE_BG)

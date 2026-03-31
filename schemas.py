@@ -6,21 +6,54 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 TASK_NAME = "ui_hierarchy_evaluation"
+FONT_TASK_NAME = "font_hierarchy_delta_assessment"
 
 DIMENSION_ORDER = [
     "visual_saliency_difference",
     "grouping_compactness_separation",
     "alignment_consistency",
-    "reading_flow_continuity",
-    "visual_noise",
 ]
 
 DIMENSION_LABELS = {
     "visual_saliency_difference": "视觉显著性差异",
-    "grouping_compactness_separation": "组内紧密与分离度",
+    "grouping_compactness_separation": "组内紧密与组间分离度",
     "alignment_consistency": "对齐一致性",
-    "reading_flow_continuity": "阅读流连续性",
-    "visual_noise": "视觉干扰度",
+}
+
+METRIC_LABELS = {
+    "font_hierarchy_delta": "字体层级差值",
+    "visual_weight_delta": "视觉权重差值",
+    "region_area_delta": "区域面积差值",
+    "foreground_background_contrast_delta": "前景背景对比差值",
+    "within_group_distance_mean": "组内距离均值",
+    "between_group_distance_mean": "组间距离均值",
+    "spatial_cluster_compactness": "空间聚类紧凑度",
+    "group_interval_ratio": "分组间隔比",
+    "edge_alignment_error": "边缘对齐误差",
+    "center_axis_alignment_error": "中轴对齐误差",
+    "grid_consistency": "栅格一致性",
+    "collinear_element_ratio": "共线元素占比",
+}
+
+DIMENSION_METRIC_KEYS = {
+    "visual_saliency_difference": [
+        "font_hierarchy_delta",
+        "visual_weight_delta",
+        "region_area_delta",
+        "foreground_background_contrast_delta",
+    ],
+    "grouping_compactness_separation": [
+        "within_group_distance_mean",
+        "between_group_distance_mean",
+        "spatial_cluster_compactness",
+        "group_interval_ratio",
+    ],
+    "alignment_consistency": [
+        "edge_alignment_error",
+        "center_axis_alignment_error",
+        "grid_consistency",
+        "collinear_element_ratio",
+    ],
 }
 
 
@@ -28,29 +61,25 @@ class StrictBaseModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
+class MetricEvaluation(StrictBaseModel):
+    key: str = Field(..., min_length=1)
+    label: str = Field(..., min_length=1)
+    method: Literal["opencv", "multimodal_llm", "heuristic_fallback"]
+    raw_value: float | None = None
+    unit: str = Field(default="")
+    normalized_score: float = Field(..., ge=1, le=10)
+    formula: str = Field(..., min_length=6)
+    interpretation: str = Field(..., min_length=6)
+
+
 class DimensionEvaluation(StrictBaseModel):
-    score: float = Field(
-        ...,
-        ge=1,
-        le=10,
-        description="Hierarchy dimension score on a 1-10 scale.",
-    )
-    judgment: str = Field(
-        ...,
-        min_length=8,
-        description="One-sentence judgment focused on hierarchy quality.",
-    )
-    evidence: list[str] = Field(
-        ...,
-        min_length=2,
-        max_length=3,
-        description="2-3 visible layout evidence points from the screenshot.",
-    )
-    suggestion: str = Field(
-        ...,
-        min_length=8,
-        description="One actionable hierarchy improvement for this dimension.",
-    )
+    score: float = Field(..., ge=1, le=10)
+    opencv_score: float | None = Field(default=None, ge=1, le=10)
+    multimodal_score: float | None = Field(default=None, ge=1, le=10)
+    judgment: str = Field(..., min_length=8)
+    evidence: list[str] = Field(..., min_length=2, max_length=4)
+    suggestion: str = Field(..., min_length=8)
+    metrics: list[MetricEvaluation] = Field(..., min_length=1, max_length=4)
 
     @model_validator(mode="after")
     def validate_text_fields(self) -> "DimensionEvaluation":
@@ -63,32 +92,27 @@ class HierarchyDimensions(StrictBaseModel):
     visual_saliency_difference: DimensionEvaluation
     grouping_compactness_separation: DimensionEvaluation
     alignment_consistency: DimensionEvaluation
-    reading_flow_continuity: DimensionEvaluation
-    visual_noise: DimensionEvaluation
+
+
+class DetectionSummary(StrictBaseModel):
+    image_width: int = Field(..., gt=0)
+    image_height: int = Field(..., gt=0)
+    detected_elements: int = Field(..., ge=0)
+    detected_groups: int = Field(..., ge=0)
+    llm_used: bool
+    llm_status: str = Field(..., min_length=4)
 
 
 class UIHierarchyEvaluation(StrictBaseModel):
     task: Literal[TASK_NAME]
     image_name: str = Field(..., min_length=1)
-    overall_score: float = Field(
-        ...,
-        ge=1,
-        le=10,
-        description="Overall hierarchy score. Prefer the mean of the five dimension scores.",
-    )
+    overall_score: float = Field(..., ge=1, le=10)
     confidence: Literal["low", "medium", "high"]
+    method_summary: str = Field(..., min_length=12)
+    detection_summary: DetectionSummary
     dimensions: HierarchyDimensions
-    hierarchy_summary: str = Field(
-        ...,
-        min_length=20,
-        description="A synthesized summary across the five hierarchy dimensions.",
-    )
-    priority_improvements: list[str] = Field(
-        ...,
-        min_length=1,
-        max_length=3,
-        description="1-3 highest-priority improvements tied to low-scoring dimensions.",
-    )
+    hierarchy_summary: str = Field(..., min_length=20)
+    priority_improvements: list[str] = Field(..., min_length=1, max_length=3)
 
     @model_validator(mode="after")
     def validate_priority_items(self) -> "UIHierarchyEvaluation":
@@ -97,77 +121,46 @@ class UIHierarchyEvaluation(StrictBaseModel):
         return self
 
 
-def get_json_schema_dict() -> Dict[str, Any]:
+class FontHierarchyDimension(StrictBaseModel):
+    score: float = Field(..., ge=1, le=10)
+    judgment: str = Field(..., min_length=8)
+    evidence: list[str] = Field(..., min_length=2, max_length=3)
+    suggestion: str = Field(..., min_length=8)
+
+    @model_validator(mode="after")
+    def validate_evidence(self) -> "FontHierarchyDimension":
+        if any(not item.strip() for item in self.evidence):
+            raise ValueError("Evidence items must be non-empty strings.")
+        return self
+
+
+class FontHierarchyAssessment(StrictBaseModel):
+    task: Literal[FONT_TASK_NAME]
+    image_name: str = Field(..., min_length=1)
+    confidence: Literal["low", "medium", "high"]
+    font_hierarchy_delta: FontHierarchyDimension
+
+
+def get_font_hierarchy_schema_dict() -> Dict[str, Any]:
     return {
-        "name": TASK_NAME,
+        "name": FONT_TASK_NAME,
         "schema": {
             "type": "object",
             "additionalProperties": False,
             "properties": {
                 "task": {
                     "type": "string",
-                    "const": TASK_NAME,
+                    "const": FONT_TASK_NAME,
                 },
                 "image_name": {
                     "type": "string",
                     "minLength": 1,
                 },
-                "overall_score": {
-                    "type": "number",
-                    "minimum": 1,
-                    "maximum": 10,
-                },
                 "confidence": {
                     "type": "string",
                     "enum": ["low", "medium", "high"],
                 },
-                "dimensions": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "visual_saliency_difference": {
-                            "$ref": "#/$defs/dimensionEvaluation"
-                        },
-                        "grouping_compactness_separation": {
-                            "$ref": "#/$defs/dimensionEvaluation"
-                        },
-                        "alignment_consistency": {
-                            "$ref": "#/$defs/dimensionEvaluation"
-                        },
-                        "reading_flow_continuity": {
-                            "$ref": "#/$defs/dimensionEvaluation"
-                        },
-                        "visual_noise": {
-                            "$ref": "#/$defs/dimensionEvaluation"
-                        },
-                    },
-                    "required": DIMENSION_ORDER,
-                },
-                "hierarchy_summary": {
-                    "type": "string",
-                    "minLength": 20,
-                },
-                "priority_improvements": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": 3,
-                    "items": {
-                        "type": "string",
-                        "minLength": 8,
-                    },
-                },
-            },
-            "required": [
-                "task",
-                "image_name",
-                "overall_score",
-                "confidence",
-                "dimensions",
-                "hierarchy_summary",
-                "priority_improvements",
-            ],
-            "$defs": {
-                "dimensionEvaluation": {
+                "font_hierarchy_delta": {
                     "type": "object",
                     "additionalProperties": False,
                     "properties": {
@@ -195,8 +188,9 @@ def get_json_schema_dict() -> Dict[str, Any]:
                         },
                     },
                     "required": ["score", "judgment", "evidence", "suggestion"],
-                }
+                },
             },
+            "required": ["task", "image_name", "confidence", "font_hierarchy_delta"],
         },
         "strict": True,
     }

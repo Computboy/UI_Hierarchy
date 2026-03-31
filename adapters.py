@@ -8,15 +8,15 @@ from typing import Protocol
 from openai import OpenAI
 
 from config import Settings
-from prompts import SYSTEM_PROMPT, build_user_prompt
-from schemas import get_json_schema_dict
+from prompts import SYSTEM_PROMPT, build_font_hierarchy_user_prompt
+from schemas import get_font_hierarchy_schema_dict
 
 
-JSON_SCHEMA = get_json_schema_dict()
+JSON_SCHEMA = get_font_hierarchy_schema_dict()
 
 
-class MultimodalEvaluator(Protocol):
-    def evaluate_image(self, image_path: str) -> str:
+class FontHierarchyEvaluator(Protocol):
+    def evaluate_font_hierarchy(self, image_path: str) -> str:
         ...
 
 
@@ -34,20 +34,15 @@ def encode_image_to_data_url(image_path: str) -> str:
 def _require_text_output(raw_text: str | None, provider_name: str) -> str:
     if raw_text and raw_text.strip():
         return raw_text
-    raise ValueError(f"{provider_name} did not return any text output.")
+    raise ValueError(f"{provider_name} 未返回有效文本。")
 
 
-class OpenAIResponsesAdapter:
-    """Use the official Responses API with strict JSON schema output."""
-
+class OpenAIResponsesFontHierarchyAdapter:
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.client = OpenAI(
-            api_key=settings.api_key,
-            base_url=settings.base_url,
-        )
+        self.client = OpenAI(api_key=settings.api_key, base_url=settings.base_url)
 
-    def evaluate_image(self, image_path: str) -> str:
+    def evaluate_font_hierarchy(self, image_path: str) -> str:
         image_name = Path(image_path).name
         data_url = encode_image_to_data_url(image_path)
 
@@ -61,7 +56,7 @@ class OpenAIResponsesAdapter:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "input_text", "text": build_user_prompt(image_name)},
+                        {"type": "input_text", "text": build_font_hierarchy_user_prompt(image_name)},
                         {"type": "input_image", "image_url": data_url},
                     ],
                 },
@@ -75,21 +70,15 @@ class OpenAIResponsesAdapter:
                 }
             },
         )
-
         return _require_text_output(getattr(response, "output_text", None), "Responses API")
 
 
-class OpenAICompatibleChatAdapter:
-    """Use OpenAI-compatible chat completions with prompt-side JSON enforcement."""
-
+class OpenAICompatibleChatFontHierarchyAdapter:
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.client = OpenAI(
-            api_key=settings.api_key,
-            base_url=settings.base_url,
-        )
+        self.client = OpenAI(api_key=settings.api_key, base_url=settings.base_url)
 
-    def evaluate_image(self, image_path: str) -> str:
+    def evaluate_font_hierarchy(self, image_path: str) -> str:
         image_name = Path(image_path).name
         data_url = encode_image_to_data_url(image_path)
 
@@ -105,7 +94,7 @@ class OpenAICompatibleChatAdapter:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": build_user_prompt(image_name)},
+                        {"type": "text", "text": build_font_hierarchy_user_prompt(image_name)},
                         {"type": "image_url", "image_url": {"url": data_url}},
                     ],
                 },
@@ -116,12 +105,15 @@ class OpenAICompatibleChatAdapter:
         return _require_text_output(content, "Chat Completions API")
 
 
-def build_evaluator(settings: Settings) -> MultimodalEvaluator:
+def build_font_hierarchy_evaluator(settings: Settings) -> FontHierarchyEvaluator | None:
+    if not settings.enable_mllm or not settings.api_key:
+        return None
+
     provider = settings.provider.lower()
     if provider == "openai_responses":
-        return OpenAIResponsesAdapter(settings)
+        return OpenAIResponsesFontHierarchyAdapter(settings)
     if provider == "openai_compatible_chat":
-        return OpenAICompatibleChatAdapter(settings)
+        return OpenAICompatibleChatFontHierarchyAdapter(settings)
     raise ValueError(
         f"Unsupported provider: {settings.provider}. "
         "Expected one of: openai_responses | openai_compatible_chat"

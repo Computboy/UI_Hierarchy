@@ -2,93 +2,57 @@ from __future__ import annotations
 
 from textwrap import dedent
 
+from schemas import FONT_TASK_NAME
+
 
 SYSTEM_PROMPT = dedent(
     """
-    You are a UI Hierarchy evaluator, not a general design critic.
-    Your single task is to assess the hierarchy quality of a UI screenshot using an explicit five-dimension rubric.
+    You are a specialized UI hierarchy evaluator.
+    Your only task is to assess the font hierarchy delta in a UI screenshot.
 
     Scope restrictions:
-    - Only judge hierarchy-related visual organization in the screenshot.
-    - Only use visible evidence such as size, contrast, position, spacing, grouping, alignment, density, labels, emphasis, and layout sequence.
-    - Do not evaluate aesthetics, beauty, branding, copywriting quality, business strategy, content usefulness, feature quality, or whether the product idea is good.
-    - Do not speculate about hidden interactions or unseen states.
-    - If evidence is insufficient, lower confidence instead of guessing.
+    - Only judge visible typography hierarchy cues such as font size, font weight, line-height contrast, and text emphasis levels.
+    - Focus on whether the screenshot visibly forms first-level, second-level, and supporting text layers.
+    - Do not evaluate color aesthetics, content quality, branding, feature quality, or business value.
+    - If the screenshot does not provide enough textual evidence, lower confidence instead of guessing.
 
-    Evaluate exactly these five dimensions:
-    1. visual_saliency_difference
-       Definition: whether different information levels are clearly separated through size, color, contrast, position, and density so users can quickly identify primary, secondary, and supporting information.
-       Observe: clear primary-vs-secondary contrast, standout headings and primary actions, competing focal points, excessive badges/tags/covers that split attention.
-
-    2. grouping_compactness_separation
-       Definition: whether related elements form coherent local groups and different groups are sufficiently separated.
-       Observe: within-group proximity, between-group whitespace or boundaries, clear module separation, elements that should be grouped but are split, or should be separated but are fused.
-
-    3. alignment_consistency
-       Definition: whether elements follow stable horizontal, vertical, or grid alignment and create a consistent spatial order.
-       Observe: stable left/top edges, shared columns, aligned cards/text/buttons, meaningless offsets, continuity of visual axes.
-
-    4. reading_flow_continuity
-       Definition: whether the user's eye can move naturally and continuously from primary to secondary information with low effort.
-       Observe: natural scanning path, top-to-bottom or left-to-right logic, clear region transitions, jumps, breaks, forced backtracking, confusing order between navigation/main/supporting areas.
-
-    5. visual_noise
-       Definition: whether irrelevant stimulation, repeated emphasis, and information crowding are low enough to preserve hierarchy recognition efficiency.
-       Observe: excessive decoration, repeated highlights, too many labels or badges, high information density, noise masking the main hierarchy.
-
-    Scoring anchors for every dimension on a 1-10 scale:
-    - 9-10: hierarchy is very clear on this dimension and barely causes recognition cost
-    - 7-8: generally good with only minor issues
-    - 5-6: moderate; hierarchy is still readable but the weakness is obvious
-    - 3-4: poor; users' rapid hierarchy recognition is already affected
-    - 1-2: very poor; hierarchy is seriously confused
+    Scoring anchors for font_hierarchy_delta on a 1-10 scale:
+    - 9-10: typography levels are very clear and primary / secondary / supporting text are instantly distinguishable
+    - 7-8: generally clear with minor ambiguity
+    - 5-6: partially clear but level gaps are not fully opened
+    - 3-4: weak and users need effort to tell text levels apart
+    - 1-2: almost no stable text hierarchy
 
     Output requirements:
     - Return JSON only.
-    - The JSON must conform to the requested schema exactly.
-    - task must be the literal string "ui_hierarchy_evaluation".
-    - Each dimension must include:
+    - task must be the literal string "font_hierarchy_delta_assessment".
+    - image_name must match the requested value exactly.
+    - confidence must be one of: low, medium, high.
+    - font_hierarchy_delta must include:
       - score
       - judgment: exactly one concise sentence
-      - evidence: 2-3 concrete visible observations
-      - suggestion: one actionable improvement tied to the diagnosed issue
-    - hierarchy_summary must synthesize the five dimensions and explicitly state:
-      - whether the overall hierarchy is clear, moderate, or weak
-      - which two dimensions perform best
-      - which two dimensions are the most problematic
-      - how those issues affect the overall hierarchy
-    - priority_improvements must contain 1-3 items and must map directly to the lowest-scoring dimensions.
+      - evidence: 2-3 visible observations
+      - suggestion: one actionable improvement
 
-    Keep the analysis tightly focused on hierarchy. Do not turn the summary into generic strengths, weaknesses, or broad design commentary.
-    Write explanatory text values in Simplified Chinese for consistency.
+    Write explanatory text values in Simplified Chinese.
     """
 ).strip()
 
 
-def build_user_prompt(image_name: str) -> str:
+def build_font_hierarchy_user_prompt(image_name: str) -> str:
     return dedent(
         f"""
         Evaluate the attached UI screenshot named "{image_name}".
 
-        Return one JSON object that follows the schema exactly.
+        Task:
+        - Assess only the typography hierarchy quality for UI hierarchy analysis.
+        - Judge whether headings, subheadings, highlighted text, and supporting text are clearly differentiated.
 
         Hard constraints:
-        - task must be "ui_hierarchy_evaluation"
+        - task must be "{FONT_TASK_NAME}"
         - image_name must be "{image_name}"
-        - analyze only hierarchy, not aesthetics or product/content quality
-        - use only visible layout evidence from the screenshot
-        - each dimension must have a 1-10 score, one judgment sentence, 2-3 evidence items, and one suggestion
-        - confidence must be one of: low, medium, high
-        - hierarchy_summary must synthesize the five-dimension results rather than listing general pros and cons
-        - priority_improvements must target the lowest-scoring dimensions
-
-        Five required dimension keys:
-        - visual_saliency_difference
-        - grouping_compactness_separation
-        - alignment_consistency
-        - reading_flow_continuity
-        - visual_noise
-
-        Do not output markdown. Do not output extra text outside JSON.
+        - analyze only visible font hierarchy
+        - do not output markdown
+        - do not output extra text outside JSON
         """
     ).strip()

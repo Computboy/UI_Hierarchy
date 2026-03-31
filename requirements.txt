@@ -4,3 +4,5 @@ pydantic>=2.7.0
 pillow>=10.3.0
 matplotlib>=3.8.0
 requests>=2.32.0
+numpy>=1.26.0
+opencv-python-headless>=4.10.0
