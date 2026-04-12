@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from statistics import mean
 from typing import Any
 
@@ -80,6 +81,21 @@ DIMENSION_GUIDANCE = {
 
 def _image_name(image_path: str) -> str:
     return Path(image_path).name
+
+
+def _sanitize_llm_error(message: str) -> str:
+    return re.sub(r"sk-[A-Za-z0-9_-]+", "sk-***REDACTED***", message)
+
+
+def _explain_llm_error(message: str, settings: Settings) -> str:
+    text = _sanitize_llm_error(message)
+    if "Claude-code" in text and "poloai.top" in settings.base_url:
+        return (
+            f"{text} "
+            "This came from the poloai gateway before model execution, which suggests the current API key or account "
+            "does not have permission for the routed model group."
+        )
+    return text
 
 
 def _weighted_score(metric_scores: dict[str, float], weights: dict[str, float]) -> float:
@@ -239,15 +255,21 @@ def evaluate_ui_hierarchy(image_path: str, settings: Settings) -> tuple[UIHierar
     llm_error: str | None = None
     llm_result: FontHierarchyAssessment | None = None
     llm_used = False
+    llm_transport = settings.resolved_provider()
 
-    evaluator = build_font_hierarchy_evaluator(settings)
+    evaluator = None
+    try:
+        evaluator = build_font_hierarchy_evaluator(settings)
+    except Exception as exc:
+        llm_error = _explain_llm_error(str(exc), settings)
     if evaluator is not None:
+        llm_transport = getattr(evaluator, "transport_name", llm_transport)
         try:
             llm_raw_text = evaluator.evaluate_font_hierarchy(image_path)
             llm_result = parse_font_hierarchy_result(llm_raw_text, image_name=_image_name(image_path))
             llm_used = True
         except Exception as exc:
-            llm_error = str(exc)
+            llm_error = _explain_llm_error(str(exc), settings)
 
     font_metric, font_evidence, multimodal_score = _build_font_metric(llm_result, analysis.estimated_font_hierarchy)
 
@@ -307,6 +329,23 @@ def evaluate_ui_hierarchy(image_path: str, settings: Settings) -> tuple[UIHierar
     else:
         llm_status = "多模态模型未启用，字体层级差值使用启发式回退。"
 
+    llm_runtime = (
+        f"provider={settings.resolved_provider()}, "
+        f"transport={llm_transport}, "
+        f"model={settings.model}, "
+        f"base_url={settings.base_url}"
+    )
+    if llm_used:
+        llm_status = f"Multimodal font scoring succeeded ({llm_runtime})."
+    elif not settings.enable_mllm:
+        llm_status = "Multimodal scoring is disabled. Font hierarchy used heuristic fallback."
+    elif not settings.api_key:
+        llm_status = f"OPENAI_API_KEY not found ({llm_runtime}). Font hierarchy used heuristic fallback."
+    elif llm_error:
+        llm_status = f"Multimodal scoring failed ({llm_runtime}): {llm_error}"
+    else:
+        llm_status = f"Multimodal scoring was not used ({llm_runtime}). Font hierarchy used heuristic fallback."
+
     result = UIHierarchyEvaluation(
         task="ui_hierarchy_evaluation",
         image_name=_image_name(image_path),
@@ -323,6 +362,10 @@ def evaluate_ui_hierarchy(image_path: str, settings: Settings) -> tuple[UIHierar
             detected_elements=len(analysis.detected_elements),
             detected_groups=len(analysis.detected_groups),
             llm_used=llm_used,
+            llm_provider=settings.resolved_provider(),
+            llm_transport=llm_transport,
+            llm_model=settings.model,
+            llm_base_url=settings.base_url,
             llm_status=llm_status,
         ),
         dimensions=HierarchyDimensions(

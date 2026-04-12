@@ -19,40 +19,31 @@ SUPPORTED_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="UI Hierarchy Hybrid Evaluation")
     source_group = parser.add_mutually_exclusive_group(required=True)
-    source_group.add_argument(
-        "--image",
-        type=str,
-        help="输入单张 UI 截图路径，例如 input/sample_ui.png",
-    )
-    source_group.add_argument(
-        "--input-dir",
-        type=str,
-        help="批量评估指定目录下的全部图片。",
-    )
-    source_group.add_argument(
-        "--all-input",
-        action="store_true",
-        help="批量评估当前目录下 input 文件夹中的全部图片。",
-    )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=None,
-        help="批量模式下只处理前 N 张图片。",
-    )
+    source_group.add_argument("--image", type=str, help="Evaluate one UI screenshot.")
+    source_group.add_argument("--input-dir", type=str, help="Evaluate every supported image in a directory.")
+    source_group.add_argument("--all-input", action="store_true", help="Evaluate every image inside ./input.")
+    parser.add_argument("--limit", type=int, default=None, help="Limit batch mode to the first N images.")
     parser.add_argument(
         "--skip-llm",
         action="store_true",
-        help="跳过多模态模型，仅使用 OpenCV 和启发式回退。",
+        help="Disable the multimodal model and use OpenCV plus heuristic fallback only.",
     )
+    parser.add_argument("--model", type=str, default=None, help="Override UI_EVAL_MODEL for this run.")
+    parser.add_argument(
+        "--provider",
+        type=str,
+        default=None,
+        help="Override UI_EVAL_PROVIDER for this run. Use auto, openai_responses, or openai_compatible_chat.",
+    )
+    parser.add_argument("--base-url", type=str, default=None, help="Override OPENAI_BASE_URL for this run.")
     return parser.parse_args()
 
 
 def collect_image_paths(directory: Path, limit: int | None = None) -> list[Path]:
     if not directory.exists():
-        raise FileNotFoundError(f"未找到输入目录：{directory}")
+        raise FileNotFoundError(f"Input directory not found: {directory}")
     if not directory.is_dir():
-        raise NotADirectoryError(f"输入路径不是目录：{directory}")
+        raise NotADirectoryError(f"Input path is not a directory: {directory}")
 
     image_paths = sorted(
         [path for path in directory.iterdir() if path.is_file() and path.suffix.lower() in SUPPORTED_IMAGE_SUFFIXES],
@@ -60,10 +51,10 @@ def collect_image_paths(directory: Path, limit: int | None = None) -> list[Path]
     )
     if limit is not None:
         if limit <= 0:
-            raise ValueError("--limit 必须大于 0。")
+            raise ValueError("--limit must be greater than 0.")
         image_paths = image_paths[:limit]
     if not image_paths:
-        raise ValueError(f"目录中未找到支持的图片文件：{directory}")
+        raise ValueError(f"No supported images were found in: {directory}")
     return image_paths
 
 
@@ -83,7 +74,7 @@ def evaluate_single_image(
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = build_run_dir(parent_output_dir, image_path, timestamp)
 
-    print(f"{progress_prefix}[1/5] OpenCV 提取可解释特征：{image_path.name}")
+    print(f"{progress_prefix}[1/5] Extracting OpenCV features: {image_path.name}")
     result, artifacts = evaluate_ui_hierarchy(str(image_path), settings)
 
     json_path = run_dir / "result.json"
@@ -91,16 +82,16 @@ def evaluate_single_image(
     chart_path = run_dir / "scores.png"
     card_path = run_dir / "summary.png"
 
-    print(f"{progress_prefix}[2/5] 保存结构化 JSON")
+    print(f"{progress_prefix}[2/5] Saving JSON result")
     save_json_result(result, str(json_path))
 
-    print(f"{progress_prefix}[3/5] 保存布局检测可视化")
+    print(f"{progress_prefix}[3/5] Saving layout overlay")
     save_image_bgr(artifacts.overlay_image, str(overlay_path))
 
-    print(f"{progress_prefix}[4/5] 生成评分图表")
+    print(f"{progress_prefix}[4/5] Rendering score chart")
     plot_bar_chart(result, str(chart_path))
 
-    print(f"{progress_prefix}[5/5] 生成摘要报告卡片")
+    print(f"{progress_prefix}[5/5] Rendering summary card")
     create_summary_card(result, str(image_path), str(card_path))
 
     if artifacts.llm_raw_text:
@@ -108,8 +99,8 @@ def evaluate_single_image(
     if artifacts.llm_error:
         (run_dir / "llm_error.txt").write_text(artifacts.llm_error, encoding="utf-8")
 
-    print(f"\n{progress_prefix}评估完成")
-    print(f"{progress_prefix}- 输出目录: {run_dir}")
+    print(f"\n{progress_prefix}Evaluation finished")
+    print(f"{progress_prefix}- Output Dir: {run_dir}")
     print(f"{progress_prefix}- JSON: {json_path}")
     print(f"{progress_prefix}- Layout Overlay: {overlay_path}")
     print(f"{progress_prefix}- Score Chart: {chart_path}")
@@ -156,29 +147,37 @@ def run_batch(image_paths: list[Path], settings: Settings, output_root: Path) ->
         records.append(record)
 
     summary_path = save_batch_summary(batch_dir, records)
-    print("\n批量评估完成")
-    print(f"- 批量输出目录: {batch_dir}")
-    print(f"- 批量汇总文件: {summary_path}")
+    print("\nBatch evaluation finished")
+    print(f"- Batch Output Dir: {batch_dir}")
+    print(f"- Batch Summary: {summary_path}")
 
 
 def main() -> None:
     args = parse_args()
-    settings = Settings.from_env().with_cli_overrides(skip_llm=args.skip_llm)
+    settings = Settings.from_env().with_cli_overrides(
+        skip_llm=args.skip_llm,
+        base_url=args.base_url,
+        provider=args.provider,
+        model=args.model,
+    )
     output_root = Path(settings.output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
+
+    if settings.enable_mllm:
+        print(f"[LLM] {settings.llm_runtime_summary()}")
+        if not settings.api_key:
+            print("[LLM] OPENAI_API_KEY not found. The run will fall back to heuristics.")
+    else:
+        print("[LLM] disabled. The run will use OpenCV plus heuristic fallback only.")
 
     if args.image:
         image_path = Path(args.image)
         if not image_path.exists():
-            raise FileNotFoundError(f"未找到输入图片：{image_path}")
+            raise FileNotFoundError(f"Input image not found: {image_path}")
         evaluate_single_image(image_path, settings, output_root)
         return
 
-    if args.all_input:
-        input_dir = Path("input")
-    else:
-        input_dir = Path(args.input_dir)
-
+    input_dir = Path("input") if args.all_input else Path(args.input_dir)
     image_paths = collect_image_paths(input_dir, limit=args.limit)
     run_batch(image_paths, settings, output_root)
 

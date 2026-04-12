@@ -100,6 +100,10 @@ class DetectionSummary(StrictBaseModel):
     detected_elements: int = Field(..., ge=0)
     detected_groups: int = Field(..., ge=0)
     llm_used: bool
+    llm_provider: str | None = None
+    llm_transport: str | None = None
+    llm_model: str | None = None
+    llm_base_url: str | None = None
     llm_status: str = Field(..., min_length=4)
 
 

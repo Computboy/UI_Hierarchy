@@ -16,6 +16,8 @@ JSON_SCHEMA = get_font_hierarchy_schema_dict()
 
 
 class FontHierarchyEvaluator(Protocol):
+    transport_name: str
+
     def evaluate_font_hierarchy(self, image_path: str) -> str:
         ...
 
@@ -34,10 +36,30 @@ def encode_image_to_data_url(image_path: str) -> str:
 def _require_text_output(raw_text: str | None, provider_name: str) -> str:
     if raw_text and raw_text.strip():
         return raw_text
-    raise ValueError(f"{provider_name} 未返回有效文本。")
+    raise ValueError(f"{provider_name} did not return a text payload.")
+
+
+def _validate_model_endpoint_compatibility(settings: Settings) -> None:
+    model_name = settings.model.strip()
+    if not model_name:
+        raise ValueError("UI_EVAL_MODEL is empty.")
+
+    if settings.is_official_openai_endpoint() and model_name.lower().startswith("claude"):
+        raise ValueError(
+            f"Model '{settings.model}' looks like an Anthropic model, "
+            "but OPENAI_BASE_URL points to the official OpenAI endpoint. "
+            "Use an official GPT model name, or switch OPENAI_BASE_URL back to your compatible router."
+        )
+
+
+def _client_supports_responses_api(settings: Settings) -> bool:
+    client = OpenAI(api_key=settings.api_key, base_url=settings.base_url)
+    return hasattr(client, "responses")
 
 
 class OpenAIResponsesFontHierarchyAdapter:
+    transport_name = "openai_responses"
+
     def __init__(self, settings: Settings):
         self.settings = settings
         self.client = OpenAI(api_key=settings.api_key, base_url=settings.base_url)
@@ -74,6 +96,8 @@ class OpenAIResponsesFontHierarchyAdapter:
 
 
 class OpenAICompatibleChatFontHierarchyAdapter:
+    transport_name = "openai_compatible_chat"
+
     def __init__(self, settings: Settings):
         self.settings = settings
         self.client = OpenAI(api_key=settings.api_key, base_url=settings.base_url)
@@ -109,12 +133,16 @@ def build_font_hierarchy_evaluator(settings: Settings) -> FontHierarchyEvaluator
     if not settings.enable_mllm or not settings.api_key:
         return None
 
-    provider = settings.provider.lower()
+    _validate_model_endpoint_compatibility(settings)
+
+    provider = settings.resolved_provider()
     if provider == "openai_responses":
+        if not _client_supports_responses_api(settings):
+            return OpenAICompatibleChatFontHierarchyAdapter(settings)
         return OpenAIResponsesFontHierarchyAdapter(settings)
     if provider == "openai_compatible_chat":
         return OpenAICompatibleChatFontHierarchyAdapter(settings)
     raise ValueError(
         f"Unsupported provider: {settings.provider}. "
-        "Expected one of: openai_responses | openai_compatible_chat"
+        "Expected one of: auto | openai_responses | openai_compatible_chat"
     )

@@ -172,6 +172,14 @@ def create_summary_card(result, original_image_path: str, save_path: str) -> Non
         )
     )
     overview_lines.extend(wrap_labeled_text("LLM", result.detection_summary.llm_status, 54))
+    if result.detection_summary.llm_provider:
+        overview_lines.extend(wrap_labeled_text("LLM Provider", result.detection_summary.llm_provider, 54))
+    if result.detection_summary.llm_transport:
+        overview_lines.extend(wrap_labeled_text("LLM Transport", result.detection_summary.llm_transport, 54))
+    if result.detection_summary.llm_model:
+        overview_lines.extend(wrap_labeled_text("LLM Model", result.detection_summary.llm_model, 54))
+    if result.detection_summary.llm_base_url:
+        overview_lines.extend(wrap_labeled_text("LLM Base URL", result.detection_summary.llm_base_url, 54))
     overview_lines.extend(wrap_labeled_text("Method", result.method_summary, 54))
 
     dimension_blocks = []
