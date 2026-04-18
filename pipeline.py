@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 import re
 from statistics import mean
@@ -106,6 +107,10 @@ def _weighted_score(metric_scores: dict[str, float], weights: dict[str, float]) 
 
 def _simple_average(metric_scores: list[float]) -> float:
     return round(mean(metric_scores), 1) if metric_scores else 1.0
+
+
+def _transform_grouping_dimension_score(score: float) -> float:
+    return round(max(1.0, min(10.0, score)), 1)
 
 
 def _to_metric_model(measurement) -> MetricEvaluation:
@@ -288,7 +293,8 @@ def evaluate_ui_hierarchy(image_path: str, settings: Settings) -> tuple[UIHierar
     )
 
     grouping_metrics = [_to_metric_model(analysis.metrics[key]) for key in DIMENSION_METRIC_KEYS["grouping_compactness_separation"]]
-    grouping_score = _simple_average([metric.normalized_score for metric in grouping_metrics])
+    grouping_raw_score = _simple_average([metric.normalized_score for metric in grouping_metrics])
+    grouping_score = _transform_grouping_dimension_score(grouping_raw_score)
 
     alignment_metrics = [_to_metric_model(analysis.metrics[key]) for key in DIMENSION_METRIC_KEYS["alignment_consistency"]]
     alignment_score = _simple_average([metric.normalized_score for metric in alignment_metrics])
