@@ -6,7 +6,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-DIR_PATH = 'outputs/batch_20260412_142235'
+# DIR_PATH = 'outputs/batch_20260418_161911'
+DIR_PATH = 'outputs/batch_20260418_230712'
 
 plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False
@@ -25,7 +26,7 @@ def parse_args():
     parser.add_argument('--batch-dir', default=DIR_PATH, help='包含多个 result.json 子目录的批次目录。')
     parser.add_argument('--output', default=None, help='输出图片路径，默认保存到批次目录下的 dimension_scores_clean.png。')
     parser.add_argument('--sort-by', choices=['overall', 'visual', 'grouping', 'alignment'], default='overall', help='样本排序方式。')
-    parser.add_argument('--top-n', type=int, default=30, help='仅展示前 N 个样本，默认 30。')
+    parser.add_argument('--top-n', type=int, default=20, help='仅展示前 N 个样本，默认 30。')
     parser.add_argument('--style', choices=['heatmap', 'barh'], default='heatmap', help='图表样式。')
     parser.add_argument('--dpi', type=int, default=300, help='导出图片分辨率。')
     return parser.parse_args()

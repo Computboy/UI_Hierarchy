@@ -8,17 +8,26 @@ from typing import Protocol
 from openai import OpenAI
 
 from config import Settings
-from prompts import SYSTEM_PROMPT, build_font_hierarchy_user_prompt
-from schemas import get_font_hierarchy_schema_dict
+from prompts import (
+    FONT_SYSTEM_PROMPT,
+    GROUPING_SYSTEM_PROMPT,
+    build_font_hierarchy_user_prompt,
+    build_grouping_compactness_user_prompt,
+)
+from schemas import get_font_hierarchy_schema_dict, get_grouping_compactness_schema_dict
 
 
-JSON_SCHEMA = get_font_hierarchy_schema_dict()
+FONT_JSON_SCHEMA = get_font_hierarchy_schema_dict()
+GROUPING_JSON_SCHEMA = get_grouping_compactness_schema_dict()
 
 
-class FontHierarchyEvaluator(Protocol):
+class MultimodalHierarchyEvaluator(Protocol):
     transport_name: str
 
     def evaluate_font_hierarchy(self, image_path: str) -> str:
+        ...
+
+    def evaluate_grouping_compactness(self, image_path: str) -> str:
         ...
 
 
@@ -57,28 +66,33 @@ def _client_supports_responses_api(settings: Settings) -> bool:
     return hasattr(client, "responses")
 
 
-class OpenAIResponsesFontHierarchyAdapter:
+class OpenAIResponsesMultimodalAdapter:
     transport_name = "openai_responses"
 
     def __init__(self, settings: Settings):
         self.settings = settings
         self.client = OpenAI(api_key=settings.api_key, base_url=settings.base_url)
 
-    def evaluate_font_hierarchy(self, image_path: str) -> str:
-        image_name = Path(image_path).name
+    def _evaluate_with_schema(
+        self,
+        image_path: str,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        json_schema: dict,
+    ) -> str:
         data_url = encode_image_to_data_url(image_path)
-
         response = self.client.responses.create(
             model=self.settings.model,
             input=[
                 {
                     "role": "system",
-                    "content": [{"type": "input_text", "text": SYSTEM_PROMPT}],
+                    "content": [{"type": "input_text", "text": system_prompt}],
                 },
                 {
                     "role": "user",
                     "content": [
-                        {"type": "input_text", "text": build_font_hierarchy_user_prompt(image_name)},
+                        {"type": "input_text", "text": user_prompt},
                         {"type": "input_image", "image_url": data_url},
                     ],
                 },
@@ -86,26 +100,48 @@ class OpenAIResponsesFontHierarchyAdapter:
             text={
                 "format": {
                     "type": "json_schema",
-                    "name": JSON_SCHEMA["name"],
-                    "schema": JSON_SCHEMA["schema"],
+                    "name": json_schema["name"],
+                    "schema": json_schema["schema"],
                     "strict": True,
                 }
             },
         )
         return _require_text_output(getattr(response, "output_text", None), "Responses API")
 
+    def evaluate_font_hierarchy(self, image_path: str) -> str:
+        image_name = Path(image_path).name
+        return self._evaluate_with_schema(
+            image_path,
+            system_prompt=FONT_SYSTEM_PROMPT,
+            user_prompt=build_font_hierarchy_user_prompt(image_name),
+            json_schema=FONT_JSON_SCHEMA,
+        )
 
-class OpenAICompatibleChatFontHierarchyAdapter:
+    def evaluate_grouping_compactness(self, image_path: str) -> str:
+        image_name = Path(image_path).name
+        return self._evaluate_with_schema(
+            image_path,
+            system_prompt=GROUPING_SYSTEM_PROMPT,
+            user_prompt=build_grouping_compactness_user_prompt(image_name),
+            json_schema=GROUPING_JSON_SCHEMA,
+        )
+
+
+class OpenAICompatibleChatMultimodalAdapter:
     transport_name = "openai_compatible_chat"
 
     def __init__(self, settings: Settings):
         self.settings = settings
         self.client = OpenAI(api_key=settings.api_key, base_url=settings.base_url)
 
-    def evaluate_font_hierarchy(self, image_path: str) -> str:
-        image_name = Path(image_path).name
+    def _evaluate_json_object(
+        self,
+        image_path: str,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> str:
         data_url = encode_image_to_data_url(image_path)
-
         completion = self.client.chat.completions.create(
             model=self.settings.model,
             temperature=0.1,
@@ -113,12 +149,12 @@ class OpenAICompatibleChatFontHierarchyAdapter:
             messages=[
                 {
                     "role": "system",
-                    "content": SYSTEM_PROMPT,
+                    "content": system_prompt,
                 },
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": build_font_hierarchy_user_prompt(image_name)},
+                        {"type": "text", "text": user_prompt},
                         {"type": "image_url", "image_url": {"url": data_url}},
                     ],
                 },
@@ -128,8 +164,24 @@ class OpenAICompatibleChatFontHierarchyAdapter:
         content = completion.choices[0].message.content
         return _require_text_output(content, "Chat Completions API")
 
+    def evaluate_font_hierarchy(self, image_path: str) -> str:
+        image_name = Path(image_path).name
+        return self._evaluate_json_object(
+            image_path,
+            system_prompt=FONT_SYSTEM_PROMPT,
+            user_prompt=build_font_hierarchy_user_prompt(image_name),
+        )
 
-def build_font_hierarchy_evaluator(settings: Settings) -> FontHierarchyEvaluator | None:
+    def evaluate_grouping_compactness(self, image_path: str) -> str:
+        image_name = Path(image_path).name
+        return self._evaluate_json_object(
+            image_path,
+            system_prompt=GROUPING_SYSTEM_PROMPT,
+            user_prompt=build_grouping_compactness_user_prompt(image_name),
+        )
+
+
+def build_multimodal_hierarchy_evaluator(settings: Settings) -> MultimodalHierarchyEvaluator | None:
     if not settings.enable_mllm or not settings.api_key:
         return None
 
@@ -138,11 +190,15 @@ def build_font_hierarchy_evaluator(settings: Settings) -> FontHierarchyEvaluator
     provider = settings.resolved_provider()
     if provider == "openai_responses":
         if not _client_supports_responses_api(settings):
-            return OpenAICompatibleChatFontHierarchyAdapter(settings)
-        return OpenAIResponsesFontHierarchyAdapter(settings)
+            return OpenAICompatibleChatMultimodalAdapter(settings)
+        return OpenAIResponsesMultimodalAdapter(settings)
     if provider == "openai_compatible_chat":
-        return OpenAICompatibleChatFontHierarchyAdapter(settings)
+        return OpenAICompatibleChatMultimodalAdapter(settings)
     raise ValueError(
         f"Unsupported provider: {settings.provider}. "
         "Expected one of: auto | openai_responses | openai_compatible_chat"
     )
+
+
+def build_font_hierarchy_evaluator(settings: Settings) -> MultimodalHierarchyEvaluator | None:
+    return build_multimodal_hierarchy_evaluator(settings)

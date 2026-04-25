@@ -6,7 +6,12 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from schemas import FONT_TASK_NAME, FontHierarchyAssessment
+from schemas import (
+    FONT_TASK_NAME,
+    GROUPING_TASK_NAME,
+    FontHierarchyAssessment,
+    GroupingCompactnessAssessment,
+)
 
 
 def extract_json_text(raw_text: str) -> str:
@@ -120,7 +125,7 @@ def normalize_font_payload(data: dict[str, Any], image_name: str | None = None) 
     if not isinstance(target, dict):
         target = data
 
-    normalized = {
+    return {
         "task": FONT_TASK_NAME,
         "image_name": clean_string(data.get("image_name") or image_name),
         "confidence": normalize_confidence(data.get("confidence")),
@@ -131,7 +136,24 @@ def normalize_font_payload(data: dict[str, Any], image_name: str | None = None) 
             "suggestion": clean_string(target.get("suggestion") or target.get("recommendation")),
         },
     }
-    return normalized
+
+
+def normalize_grouping_payload(data: dict[str, Any], image_name: str | None = None) -> dict[str, Any]:
+    target = data.get("grouping_compactness_separation")
+    if not isinstance(target, dict):
+        target = data
+
+    return {
+        "task": GROUPING_TASK_NAME,
+        "image_name": clean_string(data.get("image_name") or image_name),
+        "confidence": normalize_confidence(data.get("confidence")),
+        "grouping_compactness_separation": {
+            "score": coerce_score(target.get("score") or data.get("score")),
+            "judgment": clean_string(target.get("judgment") or target.get("analysis")),
+            "evidence": clean_string_list(target.get("evidence") or target.get("observations"), max_items=3),
+            "suggestion": clean_string(target.get("suggestion") or target.get("recommendation")),
+        },
+    }
 
 
 def format_validation_error(exc: ValidationError) -> str:
@@ -153,6 +175,22 @@ def parse_font_hierarchy_result(raw_text: str, image_name: str | None = None) ->
         normalized_dump = json.dumps(normalized, ensure_ascii=False, indent=2)
         raise ValueError(
             "字体层级模型输出未通过校验。\n"
+            f"{format_validation_error(exc)}\n"
+            f"Normalized payload:\n{normalized_dump}"
+        ) from exc
+
+
+def parse_grouping_compactness_result(raw_text: str, image_name: str | None = None) -> GroupingCompactnessAssessment:
+    json_text = extract_json_text(raw_text)
+    data = load_json_with_repair(json_text)
+    normalized = normalize_grouping_payload(data, image_name=image_name)
+
+    try:
+        return GroupingCompactnessAssessment.model_validate(normalized)
+    except ValidationError as exc:
+        normalized_dump = json.dumps(normalized, ensure_ascii=False, indent=2)
+        raise ValueError(
+            "组内紧密与组间分离度模型输出未通过校验。\n"
             f"{format_validation_error(exc)}\n"
             f"Normalized payload:\n{normalized_dump}"
         ) from exc

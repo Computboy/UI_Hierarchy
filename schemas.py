@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 TASK_NAME = "ui_hierarchy_evaluation"
 FONT_TASK_NAME = "font_hierarchy_delta_assessment"
+GROUPING_TASK_NAME = "grouping_compactness_separation_assessment"
 
 DIMENSION_ORDER = [
     "visual_saliency_difference",
@@ -138,11 +139,31 @@ class FontHierarchyDimension(StrictBaseModel):
         return self
 
 
+class GroupingCompactnessDimension(StrictBaseModel):
+    score: float = Field(..., ge=1, le=10)
+    judgment: str = Field(..., min_length=8)
+    evidence: list[str] = Field(..., min_length=2, max_length=3)
+    suggestion: str = Field(..., min_length=8)
+
+    @model_validator(mode="after")
+    def validate_evidence(self) -> "GroupingCompactnessDimension":
+        if any(not item.strip() for item in self.evidence):
+            raise ValueError("Evidence items must be non-empty strings.")
+        return self
+
+
 class FontHierarchyAssessment(StrictBaseModel):
     task: Literal[FONT_TASK_NAME]
     image_name: str = Field(..., min_length=1)
     confidence: Literal["low", "medium", "high"]
     font_hierarchy_delta: FontHierarchyDimension
+
+
+class GroupingCompactnessAssessment(StrictBaseModel):
+    task: Literal[GROUPING_TASK_NAME]
+    image_name: str = Field(..., min_length=1)
+    confidence: Literal["low", "medium", "high"]
+    grouping_compactness_separation: GroupingCompactnessDimension
 
 
 def get_font_hierarchy_schema_dict() -> Dict[str, Any]:
@@ -195,6 +216,61 @@ def get_font_hierarchy_schema_dict() -> Dict[str, Any]:
                 },
             },
             "required": ["task", "image_name", "confidence", "font_hierarchy_delta"],
+        },
+        "strict": True,
+    }
+
+
+def get_grouping_compactness_schema_dict() -> Dict[str, Any]:
+    return {
+        "name": GROUPING_TASK_NAME,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "const": GROUPING_TASK_NAME,
+                },
+                "image_name": {
+                    "type": "string",
+                    "minLength": 1,
+                },
+                "confidence": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high"],
+                },
+                "grouping_compactness_separation": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "score": {
+                            "type": "number",
+                            "minimum": 1,
+                            "maximum": 10,
+                        },
+                        "judgment": {
+                            "type": "string",
+                            "minLength": 8,
+                        },
+                        "evidence": {
+                            "type": "array",
+                            "minItems": 2,
+                            "maxItems": 3,
+                            "items": {
+                                "type": "string",
+                                "minLength": 4,
+                            },
+                        },
+                        "suggestion": {
+                            "type": "string",
+                            "minLength": 8,
+                        },
+                    },
+                    "required": ["score", "judgment", "evidence", "suggestion"],
+                },
+            },
+            "required": ["task", "image_name", "confidence", "grouping_compactness_separation"],
         },
         "strict": True,
     }
