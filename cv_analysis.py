@@ -3,8 +3,10 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from statistics import mean
+from statistics import mean, median
 from typing import Any
+
+from config import LayoutGroupingConfig
 
 try:
     import cv2
@@ -49,6 +51,29 @@ class BoundingBox:
 class ElementGroup:
     box: BoundingBox
     member_indices: list[int]
+    group_id: str = ""
+    column: str = "unknown"
+    group_type: str = "unknown"
+    confidence: float = 0.5
+
+
+@dataclass(frozen=True)
+class SemanticGroupHint:
+    label: str
+    x: float
+    y: float
+    w: float
+    h: float
+    role: str = "unknown"
+
+
+@dataclass(frozen=True)
+class LayoutColumn:
+    column_id: str
+    name: str
+    box: BoundingBox
+    member_indices: list[int]
+    confidence: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -69,6 +94,8 @@ class CVAnalysisResult:
     image_height: int
     detected_elements: list[BoundingBox]
     detected_groups: list[ElementGroup]
+    detected_columns: list[LayoutColumn]
+    grouping_strategy: str
     metrics: dict[str, LocalMetricMeasurement]
     overlay_image: Any
     estimated_font_hierarchy: LocalMetricMeasurement
@@ -106,6 +133,17 @@ def _score_lower_better(value: float, best: float, worst: float) -> float:
         return 5.5
     ratio = _clamp01((worst - value) / (worst - best))
     return _round_score(1 + ratio * 9)
+
+
+def _robust_center(values: list[float], default: float = 0.0) -> float:
+    if not values:
+        return default
+    ordered = sorted(values)
+    if len(ordered) < 5:
+        return float(median(ordered))
+    trim = max(1, int(len(ordered) * 0.1))
+    trimmed = ordered[trim:-trim] or ordered
+    return float(median(trimmed))
 
 
 def _describe_score(score: float, good: str, medium: str, weak: str) -> str:
@@ -157,6 +195,25 @@ def _union_boxes(boxes: list[BoundingBox]) -> BoundingBox:
     return BoundingBox(x1, y1, x2 - x1, y2 - y1)
 
 
+def _expand_box(box: BoundingBox, pad_x: int, pad_y: int, image_shape: tuple[int, int]) -> BoundingBox:
+    h, w = image_shape
+    x1 = max(0, box.x - pad_x)
+    y1 = max(0, box.y - pad_y)
+    x2 = min(w, box.right + pad_x)
+    y2 = min(h, box.bottom + pad_y)
+    return BoundingBox(x1, y1, max(1, x2 - x1), max(1, y2 - y1))
+
+
+def _box_to_list(box: BoundingBox) -> list[int]:
+    return [box.x, box.y, box.right, box.bottom]
+
+
+def _percentile(values: list[float], q: float, default: float = 0.0) -> float:
+    if not values:
+        return default
+    return float(np.percentile(np.array(values, dtype=float), q))
+
+
 def _intersection_over_union(a: BoundingBox, b: BoundingBox) -> float:
     x1 = max(a.x, b.x)
     y1 = max(a.y, b.y)
@@ -167,6 +224,17 @@ def _intersection_over_union(a: BoundingBox, b: BoundingBox) -> float:
     inter = (x2 - x1) * (y2 - y1)
     union = a.area + b.area - inter
     return inter / union if union else 0.0
+
+
+def _smaller_box_overlap(a: BoundingBox, b: BoundingBox) -> float:
+    x1 = max(a.x, b.x)
+    y1 = max(a.y, b.y)
+    x2 = min(a.right, b.right)
+    y2 = min(a.bottom, b.bottom)
+    if x2 <= x1 or y2 <= y1:
+        return 0.0
+    inter = (x2 - x1) * (y2 - y1)
+    return inter / max(1, min(a.area, b.area))
 
 
 def _remove_nested_boxes(boxes: list[BoundingBox], overlap_threshold: float = 0.92) -> list[BoundingBox]:
@@ -314,9 +382,503 @@ def _fallback_groups_by_rows(element_boxes: list[BoundingBox], image_height: int
     return groups
 
 
-def _detect_groups(element_boxes: list[BoundingBox], image_shape: tuple[int, int]) -> list[ElementGroup]:
+def _split_indices_by_y_gaps(
+    indexed_boxes: list[tuple[int, BoundingBox]],
+    image_height: int,
+) -> list[list[int]]:
+    if not indexed_boxes:
+        return []
+
+    heights = [box.h for _, box in indexed_boxes]
+    gap_threshold = max(24, int(image_height * 0.025), int(_robust_center([float(item) for item in heights], 24.0) * 2.2))
+    sorted_pairs = sorted(indexed_boxes, key=lambda item: (item[1].y, item[1].x))
+    groups: list[list[int]] = []
+    current_indices: list[int] = [sorted_pairs[0][0]]
+    current_bottom = sorted_pairs[0][1].bottom
+
+    for index, box in sorted_pairs[1:]:
+        vertical_gap = max(0, box.y - current_bottom)
+        if vertical_gap > gap_threshold:
+            groups.append(current_indices.copy())
+            current_indices = [index]
+        else:
+            current_indices.append(index)
+        current_bottom = max(current_bottom, box.bottom)
+
+    groups.append(current_indices.copy())
+    return groups
+
+
+def _fallback_groups_by_columns_and_rows(
+    element_boxes: list[BoundingBox],
+    image_shape: tuple[int, int],
+) -> list[ElementGroup]:
     if not element_boxes:
         return []
+
+    h, w = image_shape
+    image_area = h * w
+    indexed_boxes = list(enumerate(element_boxes))
+    content_items = [
+        (index, box)
+        for index, box in indexed_boxes
+        if box.area < image_area * 0.12 and not (box.w >= w * 0.65 and box.h >= h * 0.22)
+    ]
+    if len(content_items) < max(4, len(indexed_boxes) // 3):
+        content_items = indexed_boxes
+
+    widths = [float(box.w) for _, box in content_items]
+    center_threshold = max(56.0, min(w * 0.14, _robust_center(widths, 56.0) * 1.6))
+    wide_items = [(index, box) for index, box in content_items if box.w >= w * 0.68]
+    regular_items = [(index, box) for index, box in content_items if box.w < w * 0.68]
+
+    columns: list[list[tuple[int, BoundingBox]]] = []
+    for item in sorted(regular_items, key=lambda pair: pair[1].center_x):
+        if not columns:
+            columns.append([item])
+            continue
+        column_center = _robust_center([box.center_x for _, box in columns[-1]], item[1].center_x)
+        if abs(item[1].center_x - column_center) > center_threshold:
+            columns.append([item])
+        else:
+            columns[-1].append(item)
+
+    member_groups: list[list[int]] = []
+    member_groups.extend(_split_indices_by_y_gaps(wide_items, h))
+    for column in columns:
+        member_groups.extend(_split_indices_by_y_gaps(column, h))
+
+    output: list[ElementGroup] = []
+    seen: set[tuple[int, ...]] = set()
+    for member_indices in member_groups:
+        if not member_indices:
+            continue
+        key = tuple(sorted(member_indices))
+        if key in seen:
+            continue
+        seen.add(key)
+        member_boxes = [element_boxes[index] for index in key]
+        output.append(ElementGroup(box=_union_boxes(member_boxes), member_indices=list(key)))
+
+    return sorted(output, key=lambda group: (group.box.y, group.box.x))
+
+
+def _estimate_grouping_score(
+    element_boxes: list[BoundingBox],
+    groups: list[ElementGroup],
+    image_shape: tuple[int, int],
+) -> float:
+    if not groups:
+        return 0.0
+    h, w = image_shape
+    metrics = _build_grouping_metrics(element_boxes, groups, w, h)
+    return mean(metric.normalized_score for metric in metrics.values())
+
+
+def _semantic_hint_to_box(hint: SemanticGroupHint, image_shape: tuple[int, int]) -> BoundingBox:
+    h, w = image_shape
+    x1 = int(round(_clamp01(hint.x) * w))
+    y1 = int(round(_clamp01(hint.y) * h))
+    x2 = int(round(_clamp01(hint.x + hint.w) * w))
+    y2 = int(round(_clamp01(hint.y + hint.h) * h))
+    x1 = max(0, min(w - 1, x1))
+    y1 = max(0, min(h - 1, y1))
+    x2 = max(x1 + 1, min(w, x2))
+    y2 = max(y1 + 1, min(h, y2))
+    return BoundingBox(x1, y1, x2 - x1, y2 - y1)
+
+
+def _assign_elements_to_semantic_groups(
+    element_boxes: list[BoundingBox],
+    semantic_groups: list[SemanticGroupHint] | None,
+    image_shape: tuple[int, int],
+) -> list[ElementGroup]:
+    if not semantic_groups:
+        return []
+
+    group_boxes = [_semantic_hint_to_box(hint, image_shape) for hint in semantic_groups]
+    assigned: dict[int, list[int]] = {index: [] for index in range(len(group_boxes))}
+
+    for element_index, element_box in enumerate(element_boxes):
+        best_group_index: int | None = None
+        best_score = 0.0
+        for group_index, group_box in enumerate(group_boxes):
+            center_bonus = 1.0 if _center_in_box(element_box, group_box) else 0.0
+            overlap = _smaller_box_overlap(element_box, group_box)
+            score = center_bonus + overlap
+            if score > best_score:
+                best_score = score
+                best_group_index = group_index
+        if best_group_index is not None and best_score >= 0.18:
+            assigned[best_group_index].append(element_index)
+
+    groups: list[ElementGroup] = []
+    for group_index, member_indices in assigned.items():
+        if not member_indices:
+            continue
+        hint = semantic_groups[group_index]
+        groups.append(
+            ElementGroup(
+                box=group_boxes[group_index],
+                member_indices=member_indices,
+                group_id=f"semantic_{group_index + 1:02d}",
+                column="semantic",
+                group_type=hint.role or "semantic",
+                confidence=0.82,
+            )
+        )
+
+    return sorted(groups, key=lambda group: (group.box.y, group.box.x))
+
+
+def _make_group(
+    element_boxes: list[BoundingBox],
+    member_indices: list[int],
+    *,
+    group_id: str,
+    column: str,
+    group_type: str,
+    confidence: float,
+    image_shape: tuple[int, int],
+    padding: int = 6,
+) -> ElementGroup | None:
+    if not member_indices:
+        return None
+    member_boxes = [element_boxes[index] for index in member_indices]
+    box = _expand_box(_union_boxes(member_boxes), padding, padding, image_shape)
+    return ElementGroup(
+        box=box,
+        member_indices=sorted(member_indices),
+        group_id=group_id,
+        column=column,
+        group_type=group_type,
+        confidence=max(0.0, min(1.0, confidence)),
+    )
+
+
+def _split_by_x_gaps(
+    indexed_boxes: list[tuple[int, BoundingBox]],
+    image_width: int,
+    *,
+    max_splits: int,
+    min_gap_ratio: float,
+) -> list[list[tuple[int, BoundingBox]]]:
+    if not indexed_boxes:
+        return []
+    if len(indexed_boxes) <= 2 or max_splits <= 0:
+        return [sorted(indexed_boxes, key=lambda item: item[1].center_x)]
+
+    sorted_items = sorted(indexed_boxes, key=lambda item: item[1].center_x)
+    center_gaps = [
+        sorted_items[index + 1][1].center_x - sorted_items[index][1].center_x
+        for index in range(len(sorted_items) - 1)
+    ]
+    positive_gaps = [gap for gap in center_gaps if gap > 0]
+    median_gap = _robust_center(positive_gaps, default=image_width * min_gap_ratio)
+    threshold = max(image_width * min_gap_ratio, median_gap * 1.75)
+    candidate_splits = [
+        (index, gap)
+        for index, gap in enumerate(center_gaps)
+        if gap >= threshold
+    ]
+    candidate_splits = sorted(candidate_splits, key=lambda item: item[1], reverse=True)[:max_splits]
+    split_after = sorted(index for index, _ in candidate_splits)
+    if not split_after:
+        return [sorted_items]
+
+    clusters: list[list[tuple[int, BoundingBox]]] = []
+    start = 0
+    for split_index in split_after:
+        clusters.append(sorted_items[start : split_index + 1])
+        start = split_index + 1
+    clusters.append(sorted_items[start:])
+    return [cluster for cluster in clusters if cluster]
+
+
+def _split_by_y_gaps(
+    indexed_boxes: list[tuple[int, BoundingBox]],
+    image_shape: tuple[int, int],
+    config: LayoutGroupingConfig,
+    gray=None,
+    column_box: BoundingBox | None = None,
+) -> list[list[int]]:
+    if not indexed_boxes:
+        return []
+
+    h, _ = image_shape
+    sorted_items = sorted(indexed_boxes, key=lambda item: (item[1].y, item[1].x))
+    progressive_gaps: list[float] = []
+    current_bottom = sorted_items[0][1].bottom
+    for _, box in sorted_items[1:]:
+        progressive_gaps.append(float(max(0, box.y - current_bottom)))
+        current_bottom = max(current_bottom, box.bottom)
+
+    positive_gaps = [gap for gap in progressive_gaps if gap > 1]
+    median_gap = _robust_center(positive_gaps, default=max(12.0, h * 0.012))
+    q1 = _percentile(positive_gaps, 25, default=median_gap)
+    q3 = _percentile(positive_gaps, 75, default=median_gap)
+    iqr = max(0.0, q3 - q1)
+    gap_threshold = max(
+        14.0,
+        median_gap * config.median_gap_multiplier,
+        median_gap + config.iqr_gap_multiplier * iqr,
+        h * 0.012,
+    )
+
+    groups: list[list[int]] = []
+    current_indices: list[int] = [sorted_items[0][0]]
+    current_box = sorted_items[0][1]
+    current_bottom = sorted_items[0][1].bottom
+    max_group_height = (column_box.h if column_box else h) * config.max_group_height_ratio
+
+    for index, box in sorted_items[1:]:
+        vertical_gap = max(0, box.y - current_bottom)
+        separator = has_horizontal_separator_between(current_box, box, gray, column_box, config)
+        candidate_box = _union_boxes([current_box, box])
+        too_tall = (
+            len(current_indices) >= 2
+            and candidate_box.h > max_group_height
+            and box.y > current_box.y + current_box.h * 0.45
+        )
+        should_split = vertical_gap > gap_threshold or separator or too_tall
+        if should_split:
+            groups.append(current_indices.copy())
+            current_indices = [index]
+            current_box = box
+        else:
+            current_indices.append(index)
+            current_box = candidate_box
+        current_bottom = max(current_bottom, box.bottom)
+
+    groups.append(current_indices.copy())
+    return groups
+
+
+def has_horizontal_separator_between(
+    box_a: BoundingBox,
+    box_b: BoundingBox,
+    gray,
+    column_box: BoundingBox | None,
+    config: LayoutGroupingConfig,
+) -> bool:
+    if gray is None or box_b.y <= box_a.bottom:
+        return False
+
+    gap_top = max(0, box_a.bottom)
+    gap_bottom = min(gray.shape[0], box_b.y)
+    if gap_bottom - gap_top < 4:
+        return False
+
+    x1 = column_box.x if column_box else min(box_a.x, box_b.x)
+    x2 = column_box.right if column_box else max(box_a.right, box_b.right)
+    x1 = max(0, min(gray.shape[1] - 1, x1))
+    x2 = max(x1 + 1, min(gray.shape[1], x2))
+    band = gray[gap_top:gap_bottom, x1:x2]
+    if band.size == 0:
+        return False
+
+    blank_ratio = float((band > 245).mean())
+    row_std = band.std(axis=1) if band.shape[1] > 4 else np.array([])
+    row_mean = band.mean(axis=1) if band.shape[1] > 4 else np.array([])
+    has_line = bool(np.any((row_std < 8) & (row_mean > 170) & (row_mean < 245))) if row_std.size else False
+    return blank_ratio >= config.separator_blank_ratio or has_line
+
+
+def _detect_top_groups(
+    element_boxes: list[BoundingBox],
+    image_shape: tuple[int, int],
+    config: LayoutGroupingConfig,
+) -> tuple[list[ElementGroup], set[int], BoundingBox | None]:
+    h, w = image_shape
+    top_limit = int(h * max(0.08, min(0.24, config.top_region_ratio)))
+    top_items = [
+        (index, box)
+        for index, box in enumerate(element_boxes)
+        if box.center_y <= top_limit or (box.y <= top_limit * 0.72 and box.h <= h * 0.16)
+    ]
+    if not top_items:
+        return [], set(), None
+
+    clusters = _split_by_x_gaps(top_items, w, max_splits=2, min_gap_ratio=0.035)
+    groups: list[ElementGroup] = []
+    used: set[int] = set()
+    labels = ["header", "category_tabs", "search"]
+    for order, cluster in enumerate(clusters, start=1):
+        indices = [index for index, _ in cluster]
+        used.update(indices)
+        cluster_box = _union_boxes([box for _, box in cluster])
+        if cluster_box.right > w * 0.68:
+            group_type = "search"
+        elif cluster_box.w > w * 0.35:
+            group_type = "category_tabs"
+        else:
+            group_type = labels[min(order - 1, len(labels) - 1)]
+        group = _make_group(
+            element_boxes,
+            indices,
+            group_id=f"top_{order:02d}",
+            column="top",
+            group_type=group_type,
+            confidence=0.78,
+            image_shape=image_shape,
+        )
+        if group:
+            groups.append(group)
+
+    return groups, used, _union_boxes([group.box for group in groups]) if groups else None
+
+
+def _detect_layout_columns(
+    element_boxes: list[BoundingBox],
+    candidate_indices: list[int],
+    image_shape: tuple[int, int],
+    config: LayoutGroupingConfig,
+) -> list[LayoutColumn]:
+    h, w = image_shape
+    if not candidate_indices:
+        return []
+
+    indexed = [(index, element_boxes[index]) for index in candidate_indices]
+    # Very wide bands are usually section containers or banners; keep them assignable later
+    # but do not let them collapse the x-axis column split.
+    split_basis = [
+        (index, box)
+        for index, box in indexed
+        if box.w < w * 0.72 and box.area < h * w * 0.20
+    ] or indexed
+    clusters = _split_by_x_gaps(
+        split_basis,
+        w,
+        max_splits=max(0, config.max_columns - 1),
+        min_gap_ratio=config.min_column_gap_ratio,
+    )
+    if not clusters:
+        clusters = [indexed]
+
+    clusters = sorted(clusters, key=lambda cluster: _robust_center([box.center_x for _, box in cluster], 0.0))
+    boundaries: list[float] = []
+    for left, right in zip(clusters, clusters[1:]):
+        left_center = _robust_center([box.center_x for _, box in left], 0.0)
+        right_center = _robust_center([box.center_x for _, box in right], w)
+        boundaries.append((left_center + right_center) / 2.0)
+
+    assigned: list[list[int]] = [[] for _ in clusters]
+    for index, box in indexed:
+        column_index = 0
+        while column_index < len(boundaries) and box.center_x > boundaries[column_index]:
+            column_index += 1
+        assigned[min(column_index, len(assigned) - 1)].append(index)
+
+    names_by_count = {
+        1: ["main"],
+        2: ["main", "right"],
+        3: ["left", "middle", "right"],
+    }
+    names = names_by_count.get(len(assigned), [f"column_{i + 1}" for i in range(len(assigned))])
+    columns: list[LayoutColumn] = []
+    for order, indices in enumerate(assigned, start=1):
+        if not indices:
+            continue
+        box = _expand_box(_union_boxes([element_boxes[index] for index in indices]), 10, 10, image_shape)
+        columns.append(
+            LayoutColumn(
+                column_id=f"col_{order:02d}",
+                name=names[min(order - 1, len(names) - 1)],
+                box=box,
+                member_indices=sorted(indices),
+                confidence=0.72 if len(columns) > 1 else 0.62,
+            )
+        )
+    return columns
+
+
+def _infer_group_type(column_name: str, group_box: BoundingBox, member_count: int, image_shape: tuple[int, int]) -> str:
+    h, w = image_shape
+    if group_box.y < h * 0.18:
+        return "header"
+    if column_name == "left":
+        return "left_nav" if member_count >= 2 else "side_tool_group"
+    if column_name == "right":
+        return "right_recommend_card" if member_count <= 6 else "ad_or_popup"
+    if group_box.bottom > h * 0.88:
+        return "footer_or_contact"
+    if group_box.w > w * 0.65 and group_box.h < h * 0.16:
+        return "category_tabs"
+    return "content_card" if member_count >= 1 else "unknown"
+
+
+def _build_column_groups(
+    element_boxes: list[BoundingBox],
+    columns: list[LayoutColumn],
+    image_shape: tuple[int, int],
+    config: LayoutGroupingConfig,
+    gray=None,
+) -> list[ElementGroup]:
+    output: list[ElementGroup] = []
+    counters: dict[str, int] = {}
+    for column in columns:
+        groups = _split_by_y_gaps(
+            [(index, element_boxes[index]) for index in column.member_indices],
+            image_shape,
+            config,
+            gray=gray,
+            column_box=column.box,
+        )
+        for member_indices in groups:
+            if len(member_indices) < config.min_group_elements:
+                continue
+            group_box = _union_boxes([element_boxes[index] for index in member_indices])
+            group_type = _infer_group_type(column.name, group_box, len(member_indices), image_shape)
+            counters[column.name] = counters.get(column.name, 0) + 1
+            group = _make_group(
+                element_boxes,
+                member_indices,
+                group_id=f"{column.name}_{counters[column.name]:02d}",
+                column=column.name,
+                group_type=group_type,
+                confidence=0.70,
+                image_shape=image_shape,
+            )
+            if group:
+                output.append(group)
+    return sorted(output, key=lambda group: (group.box.y, group.box.x))
+
+
+def _is_overmerged_single_group(groups: list[ElementGroup], element_count: int, image_shape: tuple[int, int]) -> bool:
+    if len(groups) != 1 or element_count < 8:
+        return False
+    h, w = image_shape
+    group = groups[0]
+    member_ratio = len(group.member_indices) / max(element_count, 1)
+    area_ratio = group.box.area / max(h * w, 1)
+    return member_ratio >= 0.65 or area_ratio >= 0.45
+
+
+def _detect_groups(
+    element_boxes: list[BoundingBox],
+    image_shape: tuple[int, int],
+    *,
+    gray=None,
+    config: LayoutGroupingConfig | None = None,
+) -> tuple[list[ElementGroup], list[LayoutColumn], str]:
+    if not element_boxes:
+        return [], [], "empty"
+
+    config = config or LayoutGroupingConfig()
+
+    # Main path: users perceive desktop pages by global header first, then columns,
+    # then repeated cards/modules inside each column. This avoids single-linkage
+    # chaining where nearby cards recursively merge into one giant region.
+    top_groups, top_indices, top_box = _detect_top_groups(element_boxes, image_shape, config)
+    body_indices = [index for index in range(len(element_boxes)) if index not in top_indices]
+    columns = _detect_layout_columns(element_boxes, body_indices, image_shape, config)
+    column_groups = _build_column_groups(element_boxes, columns, image_shape, config, gray=gray)
+    heuristic_groups = sorted(top_groups + column_groups, key=lambda group: (group.box.y, group.box.x))
+    if len(heuristic_groups) >= 2:
+        strategy = "column_module_split"
+        if top_groups:
+            strategy += "+top_region"
+        return heuristic_groups, columns, strategy
 
     h, w = image_shape
     image_area = h * w
@@ -346,7 +908,8 @@ def _detect_groups(element_boxes: list[BoundingBox], image_shape: tuple[int, int
         groups.append(ElementGroup(box=group_box, member_indices=member_indices))
 
     if len(groups) >= 2:
-        return groups
+        fallback_columns = [LayoutColumn("col_01", "fallback", _union_boxes([group.box for group in groups]), list(range(len(element_boxes))), 0.35)]
+        return groups, fallback_columns, "morphological_fallback"
 
     alt_merged = cv2.dilate(
         group_mask,
@@ -367,9 +930,19 @@ def _detect_groups(element_boxes: list[BoundingBox], image_shape: tuple[int, int
         if len(member_indices) >= 2:
             alt_groups.append(ElementGroup(box=group_box, member_indices=member_indices))
     if len(alt_groups) >= 2:
-        return alt_groups
+        fallback_columns = [LayoutColumn("col_01", "fallback", _union_boxes([group.box for group in alt_groups]), list(range(len(element_boxes))), 0.35)]
+        return alt_groups, fallback_columns, "morphological_alt_fallback"
 
-    return _fallback_groups_by_rows(element_boxes, h)
+    row_groups = _fallback_groups_by_rows(element_boxes, h)
+    layout_groups = _fallback_groups_by_columns_and_rows(element_boxes, image_shape)
+    candidates = [candidate for candidate in (groups, alt_groups, row_groups, layout_groups) if candidate]
+    multi_group_candidates = [candidate for candidate in candidates if len(candidate) >= 2]
+    if multi_group_candidates and any(_is_overmerged_single_group(candidate, len(element_boxes), image_shape) for candidate in candidates):
+        selected = max(multi_group_candidates, key=lambda candidate: _estimate_grouping_score(element_boxes, candidate, image_shape))
+    else:
+        selected = max(candidates, key=lambda candidate: _estimate_grouping_score(element_boxes, candidate, image_shape))
+    fallback_columns = [LayoutColumn("col_01", "fallback", _union_boxes([group.box for group in selected]), list(range(len(element_boxes))), 0.3)]
+    return selected, fallback_columns, "legacy_fallback"
 
 
 def _sample_top_ratio_mean(values: list[float], ratio: float = 0.18) -> float:
@@ -550,60 +1123,71 @@ def _build_grouping_metrics(
 ) -> dict[str, LocalMetricMeasurement]:
     diag = math.hypot(image_width, image_height)
     within_distances: list[float] = []
+    within_edge_distances: list[float] = []
     compactness_values: list[float] = []
 
     for group in groups:
         member_boxes = [elements[index] for index in group.member_indices]
         if len(member_boxes) >= 2:
+            content_box = _union_boxes(member_boxes)
+            group_diag = math.hypot(content_box.w, content_box.h)
             for box in member_boxes:
-                distances = [
+                center_distances = [
                     math.hypot(box.center_x - other.center_x, box.center_y - other.center_y)
                     for other in member_boxes
                     if other is not box
                 ]
-                if distances:
-                    within_distances.append(min(distances) / max(diag, 1.0))
+                edge_distances = [
+                    _bbox_distance(box, other) / max(diag, 1.0)
+                    for other in member_boxes
+                    if other is not box
+                ]
+                if center_distances:
+                    within_distances.append(min(center_distances) / max(group_diag, 1.0))
+                if edge_distances:
+                    within_edge_distances.append(min(edge_distances))
 
-            group_diag = math.hypot(group.box.w, group.box.h)
             center_distances = [
-                math.hypot(box.center_x - group.box.center_x, box.center_y - group.box.center_y)
+                math.hypot(box.center_x - content_box.center_x, box.center_y - content_box.center_y)
                 for box in member_boxes
             ]
             compactness_values.append(
-                max(0.0, 1.0 - min(1.0, mean(center_distances) / max(group_diag * 0.45, 1.0)))
+                max(0.0, 1.0 - min(1.0, _robust_center(center_distances) / max(group_diag * 0.6, 1.0)))
             )
 
     between_distances: list[float] = []
-    for index, group in enumerate(groups):
-        distances = [
-            _bbox_distance(group.box, other.box) / max(diag, 1.0)
-            for other_index, other in enumerate(groups)
-            if other_index != index
-        ]
-        if distances:
-            between_distances.append(min(distances))
+    groups_by_column: dict[str, list[ElementGroup]] = {}
+    for group in groups:
+        groups_by_column.setdefault(group.column or "unknown", []).append(group)
+    for column_groups in groups_by_column.values():
+        ordered = sorted(column_groups, key=lambda item: (item.box.y, item.box.x))
+        for current, next_group in zip(ordered, ordered[1:]):
+            if _smaller_box_overlap(current.box, next_group.box) >= 0.45:
+                continue
+            between_distances.append(_bbox_distance(current.box, next_group.box) / max(diag, 1.0))
 
-    within_mean = float(mean(within_distances)) if within_distances else 0.18
-    between_mean = float(mean(between_distances)) if between_distances else 0.0
-    compactness = float(mean(compactness_values)) if compactness_values else 0.0
-    interval_ratio = between_mean / max(within_mean, 1e-4)
+    within_mean = _robust_center(within_distances, default=0.24)
+    between_mean = _robust_center(between_distances, default=0.0)
+    compactness = _robust_center(compactness_values, default=0.0)
+    within_edge = _robust_center(within_edge_distances, default=0.004)
+    interval_ratio = between_mean / max(within_edge, 0.004)
 
-    within_score = _score_lower_better(within_mean, best=0.02, worst=0.15)
-    between_score = _score_higher_better(between_mean, worst=0.01, best=0.12)
-    compactness_score = _score_higher_better(compactness, worst=0.12, best=0.78)
-    interval_ratio_score = _score_higher_better(interval_ratio, worst=0.8, best=3.0)
+    within_score = _score_lower_better(within_mean, best=0.04, worst=0.24)
+    between_score = _score_higher_better(between_mean, worst=0.0, best=0.04)
+    compactness_score = _score_higher_better(compactness, worst=0.15, best=0.70)
+    interval_ratio_score = _score_higher_better(interval_ratio, worst=0.70, best=4.0)
 
     return {
         "within_group_distance_mean": LocalMetricMeasurement(
             key="within_group_distance_mean",
-            label="组内距离均值",
+            label="组内距离稳健值",
             method="opencv",
             raw_value=round(within_mean, 4),
-            unit="diag_ratio",
+            unit="group_diag_ratio",
             normalized_score=within_score,
-            formula="同组元素最近邻距离均值 / 图像对角线",
+            formula="同组元素最近邻中心距离的稳健中位值 / 所在组真实包围框对角线（单元素组不参与）",
             interpretation=(
-                f"组内最近邻距离均值约为画面对角线的 {within_mean:.3f}，"
+                f"组内最近邻中心距离稳健值约为所在组对角线的 {within_mean:.3f}，"
                 + _describe_score(
                     within_score,
                     "同组元素彼此靠近。",
@@ -614,14 +1198,14 @@ def _build_grouping_metrics(
         ),
         "between_group_distance_mean": LocalMetricMeasurement(
             key="between_group_distance_mean",
-            label="组间距离均值",
+            label="组间距离稳健值",
             method="opencv",
             raw_value=round(between_mean, 4),
             unit="diag_ratio",
             normalized_score=between_score,
-            formula="各分组最近边界距离均值 / 图像对角线",
+            formula="同一 column 内相邻分组真实边界距离的稳健中位值 / 图像对角线",
             interpretation=(
-                f"组间最近边界距离均值约为画面对角线的 {between_mean:.3f}，"
+                f"组间最近边界距离稳健值约为画面对角线的 {between_mean:.3f}，"
                 + _describe_score(
                     between_score,
                     "不同分组之间留白较清楚。",
@@ -637,7 +1221,7 @@ def _build_grouping_metrics(
             raw_value=round(compactness, 4),
             unit="0_1",
             normalized_score=compactness_score,
-            formula="1 - 组内元素到组中心平均距离 / 组包围框对角线",
+            formula="1 - 组内元素到真实组中心距离的稳健中位值 / 组包围框对角线",
             interpretation=(
                 f"空间聚类紧凑度约为 {compactness:.2f}，"
                 + _describe_score(
@@ -655,7 +1239,7 @@ def _build_grouping_metrics(
             raw_value=round(interval_ratio, 4),
             unit="ratio",
             normalized_score=interval_ratio_score,
-            formula="组间距离均值 / 组内距离均值",
+            formula="同栏相邻组间边界距离稳健值 / 组内元素边界距离稳健值",
             interpretation=(
                 f"分组间隔比约为 {interval_ratio:.2f}，"
                 + _describe_score(
@@ -820,15 +1404,43 @@ def _build_alignment_metrics(
     }
 
 
-def _draw_overlay(image, elements: list[BoundingBox], groups: list[ElementGroup]):
+def _draw_overlay(image, elements: list[BoundingBox], groups: list[ElementGroup], columns: list[LayoutColumn]):
     overlay = image.copy()
+    column_colors = [(255, 245, 210), (225, 245, 255), (235, 255, 225), (245, 230, 255)]
+    for index, column in enumerate(columns):
+        color = column_colors[index % len(column_colors)]
+        column_layer = overlay.copy()
+        cv2.rectangle(column_layer, (column.box.x, column.box.y), (column.box.right, column.box.bottom), color, -1)
+        overlay = cv2.addWeighted(column_layer, 0.12, overlay, 0.88, 0)
+        cv2.putText(
+            overlay,
+            column.name,
+            (column.box.x + 6, max(18, column.box.y + 18)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (90, 90, 90),
+            2,
+            cv2.LINE_AA,
+        )
+
     for group in groups:
         cv2.rectangle(overlay, (group.box.x, group.box.y), (group.box.right, group.box.bottom), (42, 130, 255), 3)
+        label = f"{group.group_id or 'group'}:{group.group_type}"
+        cv2.putText(
+            overlay,
+            label[:34],
+            (group.box.x + 4, max(16, group.box.y - 6)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (30, 80, 200),
+            2,
+            cv2.LINE_AA,
+        )
     for box in elements:
         cv2.rectangle(overlay, (box.x, box.y), (box.right, box.bottom), (52, 199, 89), 1)
     cv2.putText(
         overlay,
-        f"elements={len(elements)} groups={len(groups)}",
+        f"elements={len(elements)} groups={len(groups)} columns={len(columns)}",
         (16, 28),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.8,
@@ -838,7 +1450,7 @@ def _draw_overlay(image, elements: list[BoundingBox], groups: list[ElementGroup]
     )
     cv2.putText(
         overlay,
-        f"elements={len(elements)} groups={len(groups)}",
+        f"elements={len(elements)} groups={len(groups)} columns={len(columns)}",
         (16, 28),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.8,
@@ -849,13 +1461,42 @@ def _draw_overlay(image, elements: list[BoundingBox], groups: list[ElementGroup]
     return overlay
 
 
-def analyze_image_with_opencv(image_path: str) -> CVAnalysisResult:
+def analyze_image_with_opencv(
+    image_path: str,
+    semantic_groups: list[SemanticGroupHint] | None = None,
+    grouping_config: LayoutGroupingConfig | None = None,
+) -> CVAnalysisResult:
     image = _load_image_bgr(image_path)
     image_height, image_width = image.shape[:2]
+    grouping_config = grouping_config or LayoutGroupingConfig()
 
     gray, edges, mask = _build_foreground_mask(image)
     elements = _detect_element_boxes(mask, (image_height, image_width))
-    groups = _detect_groups(elements, (image_height, image_width))
+    semantic_detected_groups = _assign_elements_to_semantic_groups(
+        elements,
+        semantic_groups,
+        (image_height, image_width),
+    )
+    if len(semantic_detected_groups) >= 2:
+        groups = semantic_detected_groups
+        columns = [
+            LayoutColumn(
+                column_id=f"semantic_col_{index + 1:02d}",
+                name=group.column,
+                box=group.box,
+                member_indices=group.member_indices,
+                confidence=group.confidence,
+            )
+            for index, group in enumerate(groups)
+        ]
+        grouping_strategy = "multimodal_semantic_groups"
+    else:
+        groups, columns, grouping_strategy = _detect_groups(
+            elements,
+            (image_height, image_width),
+            gray=gray,
+            config=grouping_config,
+        )
 
     saliency_metrics, font_fallback_metric = _build_visual_saliency_metrics(
         elements,
@@ -877,7 +1518,9 @@ def analyze_image_with_opencv(image_path: str) -> CVAnalysisResult:
         image_height=image_height,
         detected_elements=elements,
         detected_groups=groups,
+        detected_columns=columns,
+        grouping_strategy=grouping_strategy,
         metrics=metrics,
-        overlay_image=_draw_overlay(image, elements, groups),
+        overlay_image=_draw_overlay(image, elements, groups, columns),
         estimated_font_hierarchy=font_fallback_metric,
     )

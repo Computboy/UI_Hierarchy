@@ -6,7 +6,12 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from schemas import FONT_TASK_NAME, FontHierarchyAssessment
+from schemas import (
+    FONT_TASK_NAME,
+    SEMANTIC_GROUPING_TASK_NAME,
+    FontHierarchyAssessment,
+    SemanticGroupingAssessment,
+)
 
 
 def extract_json_text(raw_text: str) -> str:
@@ -134,6 +139,55 @@ def normalize_font_payload(data: dict[str, Any], image_name: str | None = None) 
     return normalized
 
 
+def normalize_box_value(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        number = float(value)
+    except Exception:
+        return None
+    if number > 1:
+        number = number / 100.0 if number <= 100 else number / 1000.0
+    return max(0.0, min(1.0, number))
+
+
+def normalize_semantic_grouping_payload(data: dict[str, Any], image_name: str | None = None) -> dict[str, Any]:
+    raw_groups = data.get("groups") or data.get("semantic_groups") or data.get("layout_groups")
+    if not isinstance(raw_groups, list):
+        raw_groups = []
+
+    groups: list[dict[str, Any]] = []
+    for index, item in enumerate(raw_groups, start=1):
+        if not isinstance(item, dict):
+            continue
+        box = item.get("box") if isinstance(item.get("box"), dict) else item
+        label = clean_string(item.get("label") or item.get("name") or item.get("title") or f"语义分组{index}")
+        role = clean_string(item.get("role") or item.get("type") or item.get("description") or label)
+        x = normalize_box_value(box.get("x") or box.get("left"))
+        y = normalize_box_value(box.get("y") or box.get("top"))
+        w = normalize_box_value(box.get("w") or box.get("width"))
+        h = normalize_box_value(box.get("h") or box.get("height"))
+        if x is None or y is None or w is None or h is None:
+            continue
+        groups.append(
+            {
+                "label": label,
+                "role": role,
+                "x": x,
+                "y": y,
+                "w": min(w, max(0.001, 1.0 - x)),
+                "h": min(h, max(0.001, 1.0 - y)),
+            }
+        )
+
+    return {
+        "task": SEMANTIC_GROUPING_TASK_NAME,
+        "image_name": clean_string(data.get("image_name") or image_name),
+        "confidence": normalize_confidence(data.get("confidence")),
+        "groups": groups,
+    }
+
+
 def format_validation_error(exc: ValidationError) -> str:
     lines: list[str] = []
     for item in exc.errors():
@@ -153,6 +207,22 @@ def parse_font_hierarchy_result(raw_text: str, image_name: str | None = None) ->
         normalized_dump = json.dumps(normalized, ensure_ascii=False, indent=2)
         raise ValueError(
             "字体层级模型输出未通过校验。\n"
+            f"{format_validation_error(exc)}\n"
+            f"Normalized payload:\n{normalized_dump}"
+        ) from exc
+
+
+def parse_semantic_grouping_result(raw_text: str, image_name: str | None = None) -> SemanticGroupingAssessment:
+    json_text = extract_json_text(raw_text)
+    data = load_json_with_repair(json_text)
+    normalized = normalize_semantic_grouping_payload(data, image_name=image_name)
+
+    try:
+        return SemanticGroupingAssessment.model_validate(normalized)
+    except ValidationError as exc:
+        normalized_dump = json.dumps(normalized, ensure_ascii=False, indent=2)
+        raise ValueError(
+            "语义分组模型输出未通过校验。\n"
             f"{format_validation_error(exc)}\n"
             f"Normalized payload:\n{normalized_dump}"
         ) from exc

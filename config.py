@@ -16,9 +16,56 @@ def _read_bool(name: str, default: bool) -> bool:
     return value.strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _read_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def _read_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
 def _looks_like_openai_host(base_url: str) -> bool:
     host = urlparse(base_url).netloc.lower()
     return host == "api.openai.com" or host.endswith(".openai.com")
+
+
+@dataclass(frozen=True, slots=True)
+class LayoutGroupingConfig:
+    top_region_ratio: float = 0.16
+    median_gap_multiplier: float = 1.8
+    iqr_gap_multiplier: float = 1.5
+    min_group_elements: int = 1
+    max_group_height_ratio: float = 0.38
+    min_column_gap_ratio: float = 0.055
+    max_columns: int = 3
+    separator_blank_ratio: float = 0.92
+    separator_dark_ratio: float = 0.04
+
+    @classmethod
+    def from_env(cls) -> "LayoutGroupingConfig":
+        return cls(
+            top_region_ratio=_read_float("UI_GROUP_TOP_REGION_RATIO", 0.16),
+            median_gap_multiplier=_read_float("UI_GROUP_MEDIAN_GAP_MULTIPLIER", 1.8),
+            iqr_gap_multiplier=_read_float("UI_GROUP_IQR_GAP_MULTIPLIER", 1.5),
+            min_group_elements=_read_int("UI_GROUP_MIN_ELEMENTS", 1),
+            max_group_height_ratio=_read_float("UI_GROUP_MAX_HEIGHT_RATIO", 0.38),
+            min_column_gap_ratio=_read_float("UI_GROUP_MIN_COLUMN_GAP_RATIO", 0.055),
+            max_columns=_read_int("UI_GROUP_MAX_COLUMNS", 3),
+            separator_blank_ratio=_read_float("UI_GROUP_SEPARATOR_BLANK_RATIO", 0.92),
+            separator_dark_ratio=_read_float("UI_GROUP_SEPARATOR_DARK_RATIO", 0.04),
+        )
 
 
 @dataclass(slots=True)
@@ -29,6 +76,7 @@ class Settings:
     model: str
     output_dir: str
     enable_mllm: bool
+    grouping: LayoutGroupingConfig
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -39,6 +87,7 @@ class Settings:
             model=os.getenv("UI_EVAL_MODEL", "gpt-4.1-mini").strip(),
             output_dir=os.getenv("UI_EVAL_OUTPUT_DIR", "outputs").strip(),
             enable_mllm=_read_bool("UI_HIERARCHY_ENABLE_MLLM", True),
+            grouping=LayoutGroupingConfig.from_env(),
         )
 
     def with_cli_overrides(

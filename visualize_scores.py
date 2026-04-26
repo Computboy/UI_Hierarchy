@@ -112,5 +112,5 @@ def plot_scores(json_file_path, output_image='scores_bar_chart.png'):
 # 使用示例（请根据实际文件路径修改）
 if __name__ == "__main__":
     # 假设 JSON 文件名为 'batch_summary.json'，位于当前目录
-    json_file = "outputs/batch_20260412_142235/batch_summary.json"
+    json_file = "outputs/batch_20260426_183904/batch_summary.json"
     plot_scores(json_file, output_image="web_platform_scores.png")

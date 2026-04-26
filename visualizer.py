@@ -167,10 +167,15 @@ def create_summary_card(result, original_image_path: str, save_path: str) -> Non
     overview_lines.extend(
         wrap_labeled_text(
             "Detection",
-            f"{result.detection_summary.detected_elements} elements / {result.detection_summary.detected_groups} groups",
+            (
+                f"{result.detection_summary.detected_elements} elements / "
+                f"{result.detection_summary.detected_groups} groups / "
+                f"{result.detection_summary.detected_columns} columns"
+            ),
             54,
         )
     )
+    overview_lines.extend(wrap_labeled_text("Grouping", result.detection_summary.grouping_strategy, 54))
     overview_lines.extend(wrap_labeled_text("LLM", result.detection_summary.llm_status, 54))
     if result.detection_summary.llm_provider:
         overview_lines.extend(wrap_labeled_text("LLM Provider", result.detection_summary.llm_provider, 54))

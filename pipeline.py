@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import math
 from pathlib import Path
 import re
 from statistics import mean
@@ -9,8 +8,8 @@ from typing import Any
 
 from adapters import build_font_hierarchy_evaluator
 from config import Settings
-from cv_analysis import CVAnalysisResult, analyze_image_with_opencv
-from parser_utils import parse_font_hierarchy_result
+from cv_analysis import CVAnalysisResult, SemanticGroupHint, analyze_image_with_opencv
+from parser_utils import parse_font_hierarchy_result, parse_semantic_grouping_result
 from schemas import (
     DIMENSION_LABELS,
     DIMENSION_METRIC_KEYS,
@@ -19,6 +18,7 @@ from schemas import (
     FontHierarchyAssessment,
     HierarchyDimensions,
     MetricEvaluation,
+    SemanticGroupingAssessment,
     UIHierarchyEvaluation,
 )
 
@@ -140,7 +140,7 @@ def _build_font_metric(
     if llm_result is not None:
         metric = MetricEvaluation(
             key="font_hierarchy_delta",
-            label="字体层级差值",
+            label="字体层级差异",
             method="multimodal_llm",
             raw_value=None,
             unit="score",
@@ -153,7 +153,7 @@ def _build_font_metric(
     return (
         MetricEvaluation(
             key="font_hierarchy_delta",
-            label="字体层级差值",
+            label="字体层级差异",
             method="heuristic_fallback",
             raw_value=fallback_measurement.raw_value,
             unit=fallback_measurement.unit,
@@ -247,6 +247,35 @@ def _build_priority_improvements(result_dimensions: dict[str, DimensionEvaluatio
     return improvements
 
 
+def _group_debug_payload(analysis: CVAnalysisResult) -> list[dict[str, Any]]:
+    return [
+        {
+            "group_id": group.group_id or f"group_{index + 1:02d}",
+            "column": group.column,
+            "type": group.group_type,
+            "bbox": [group.box.x, group.box.y, group.box.right, group.box.bottom],
+            "element_indices": group.member_indices,
+            "element_count": len(group.member_indices),
+            "confidence": round(group.confidence, 3),
+        }
+        for index, group in enumerate(analysis.detected_groups)
+    ]
+
+
+def _column_debug_payload(analysis: CVAnalysisResult) -> list[dict[str, Any]]:
+    return [
+        {
+            "column_id": column.column_id,
+            "name": column.name,
+            "bbox": [column.box.x, column.box.y, column.box.right, column.box.bottom],
+            "element_indices": column.member_indices,
+            "element_count": len(column.member_indices),
+            "confidence": round(column.confidence, 3),
+        }
+        for column in analysis.detected_columns
+    ]
+
+
 def _build_confidence(analysis: CVAnalysisResult, llm_used: bool) -> str:
     confidence_score = 0.0
     confidence_score += 0.45 if len(analysis.detected_elements) >= 18 else 0.25 if len(analysis.detected_elements) >= 10 else 0.1
@@ -261,11 +290,10 @@ def _build_confidence(analysis: CVAnalysisResult, llm_used: bool) -> str:
 
 
 def evaluate_ui_hierarchy(image_path: str, settings: Settings) -> tuple[UIHierarchyEvaluation, PipelineArtifacts]:
-    analysis = analyze_image_with_opencv(image_path)
-
-    llm_raw_text: str | None = None
-    llm_error: str | None = None
-    llm_result: FontHierarchyAssessment | None = None
+    llm_raw_sections: list[str] = []
+    llm_error_sections: list[str] = []
+    font_llm_result: FontHierarchyAssessment | None = None
+    semantic_grouping_result: SemanticGroupingAssessment | None = None
     llm_used = False
     llm_transport = settings.resolved_provider()
 
@@ -273,17 +301,47 @@ def evaluate_ui_hierarchy(image_path: str, settings: Settings) -> tuple[UIHierar
     try:
         evaluator = build_font_hierarchy_evaluator(settings)
     except Exception as exc:
-        llm_error = _explain_llm_error(str(exc), settings)
+        llm_error_sections.append(_explain_llm_error(str(exc), settings))
+
     if evaluator is not None:
         llm_transport = getattr(evaluator, "transport_name", llm_transport)
+
         try:
-            llm_raw_text = evaluator.evaluate_font_hierarchy(image_path)
-            llm_result = parse_font_hierarchy_result(llm_raw_text, image_name=_image_name(image_path))
+            font_raw_text = evaluator.evaluate_font_hierarchy(image_path)
+            font_llm_result = parse_font_hierarchy_result(font_raw_text, image_name=_image_name(image_path))
+            llm_raw_sections.append(f"=== font_hierarchy_delta ===\n{font_raw_text}")
             llm_used = True
         except Exception as exc:
-            llm_error = _explain_llm_error(str(exc), settings)
+            llm_error_sections.append(f"font_hierarchy_delta: {_explain_llm_error(str(exc), settings)}")
 
-    font_metric, font_evidence, multimodal_score = _build_font_metric(llm_result, analysis.estimated_font_hierarchy)
+        try:
+            grouping_raw_text = evaluator.evaluate_semantic_grouping(image_path)
+            semantic_grouping_result = parse_semantic_grouping_result(
+                grouping_raw_text,
+                image_name=_image_name(image_path),
+            )
+            llm_raw_sections.append(f"=== semantic_grouping ===\n{grouping_raw_text}")
+            llm_used = True
+        except Exception as exc:
+            llm_error_sections.append(f"semantic_grouping: {_explain_llm_error(str(exc), settings)}")
+
+    llm_raw_text = "\n\n".join(llm_raw_sections) if llm_raw_sections else None
+    llm_error = "\n".join(llm_error_sections) if llm_error_sections else None
+    semantic_group_hints = [
+        SemanticGroupHint(label=group.label, x=group.x, y=group.y, w=group.w, h=group.h, role=group.role)
+        for group in semantic_grouping_result.groups
+    ] if semantic_grouping_result is not None else None
+
+    analysis = analyze_image_with_opencv(
+        image_path,
+        semantic_groups=semantic_group_hints,
+        grouping_config=settings.grouping,
+    )
+
+    font_metric, font_evidence, font_multimodal_score = _build_font_metric(
+        font_llm_result,
+        analysis.estimated_font_hierarchy,
+    )
 
     saliency_metrics = [
         font_metric,
@@ -299,11 +357,17 @@ def evaluate_ui_hierarchy(image_path: str, settings: Settings) -> tuple[UIHierar
         [metric.normalized_score for metric in saliency_metrics if metric.method == "opencv"]
     )
 
-    grouping_metrics = [_to_metric_model(analysis.metrics[key]) for key in DIMENSION_METRIC_KEYS["grouping_compactness_separation"]]
-    grouping_raw_score = _simple_average([metric.normalized_score for metric in grouping_metrics])
-    grouping_score = _transform_grouping_dimension_score(grouping_raw_score)
+    grouping_metrics = [
+        _to_metric_model(analysis.metrics[key])
+        for key in DIMENSION_METRIC_KEYS["grouping_compactness_separation"]
+    ]
+    grouping_opencv_raw_score = _simple_average([metric.normalized_score for metric in grouping_metrics])
+    grouping_opencv_score = _transform_grouping_dimension_score(grouping_opencv_raw_score)
 
-    alignment_metrics = [_to_metric_model(analysis.metrics[key]) for key in DIMENSION_METRIC_KEYS["alignment_consistency"]]
+    alignment_metrics = [
+        _to_metric_model(analysis.metrics[key])
+        for key in DIMENSION_METRIC_KEYS["alignment_consistency"]
+    ]
     alignment_score = _simple_average([metric.normalized_score for metric in alignment_metrics])
 
     result_dimensions = {
@@ -312,14 +376,14 @@ def evaluate_ui_hierarchy(image_path: str, settings: Settings) -> tuple[UIHierar
             saliency_metrics,
             saliency_score,
             opencv_score=saliency_opencv_score,
-            multimodal_score=multimodal_score,
+            multimodal_score=font_multimodal_score,
             extra_evidence=font_evidence,
         ),
         "grouping_compactness_separation": _build_dimension(
             "grouping_compactness_separation",
             grouping_metrics,
-            grouping_score,
-            opencv_score=grouping_score,
+            grouping_opencv_score,
+            opencv_score=grouping_opencv_score,
         ),
         "alignment_consistency": _build_dimension(
             "alignment_consistency",
@@ -334,33 +398,32 @@ def evaluate_ui_hierarchy(image_path: str, settings: Settings) -> tuple[UIHierar
         DIMENSION_WEIGHTS,
     )
 
-    if llm_used:
-        llm_status = "已使用多模态模型补充评估字体层级差值。"
-    elif not settings.enable_mllm:
-        llm_status = "多模态模型已关闭，字体层级差值使用启发式回退。"
-    elif not settings.api_key:
-        llm_status = "未检测到 OPENAI_API_KEY，字体层级差值使用启发式回退。"
-    elif llm_error:
-        llm_status = f"多模态模型调用失败，字体层级差值使用启发式回退：{llm_error}"
-    else:
-        llm_status = "多模态模型未启用，字体层级差值使用启发式回退。"
-
     llm_runtime = (
         f"provider={settings.resolved_provider()}, "
         f"transport={llm_transport}, "
         f"model={settings.model}, "
         f"base_url={settings.base_url}"
     )
-    if llm_used:
-        llm_status = f"Multimodal font scoring succeeded ({llm_runtime})."
+    if font_llm_result is not None and semantic_grouping_result is not None:
+        llm_status = f"Multimodal font scoring and semantic grouping succeeded ({llm_runtime})."
+    elif font_llm_result is not None:
+        llm_status = (
+            f"Multimodal font scoring succeeded; grouping used robust OpenCV fallback ({llm_runtime})."
+            + (f" {llm_error}" if llm_error else "")
+        )
+    elif semantic_grouping_result is not None:
+        llm_status = (
+            f"Multimodal semantic grouping succeeded; font hierarchy used heuristic fallback ({llm_runtime})."
+            + (f" {llm_error}" if llm_error else "")
+        )
     elif not settings.enable_mllm:
-        llm_status = "Multimodal scoring is disabled. Font hierarchy used heuristic fallback."
+        llm_status = "Multimodal scoring is disabled. Font hierarchy and grouping used fallback logic."
     elif not settings.api_key:
-        llm_status = f"OPENAI_API_KEY not found ({llm_runtime}). Font hierarchy used heuristic fallback."
+        llm_status = f"OPENAI_API_KEY not found ({llm_runtime}). Font hierarchy and grouping used fallback logic."
     elif llm_error:
         llm_status = f"Multimodal scoring failed ({llm_runtime}): {llm_error}"
     else:
-        llm_status = f"Multimodal scoring was not used ({llm_runtime}). Font hierarchy used heuristic fallback."
+        llm_status = f"Multimodal scoring was not used ({llm_runtime}). Font hierarchy and grouping used fallback logic."
 
     result = UIHierarchyEvaluation(
         task="ui_hierarchy_evaluation",
@@ -368,15 +431,19 @@ def evaluate_ui_hierarchy(image_path: str, settings: Settings) -> tuple[UIHierar
         overall_score=overall_score,
         confidence=_build_confidence(analysis, llm_used),
         method_summary=(
-            "本版本采用 OpenCV 规则特征与多模态模型补充相结合的混合路线："
-            "面积、对比、间距、聚类和对齐等可解释指标由 OpenCV 提取，"
-            "字体层级差值优先由多模态模型判断，再汇总为三个 Hierarchy 维度分数。"
+            "本版本采用 OpenCV 规则特征与多模态模型互补结合的混合路线："
+            "字体层级差异由多模态模型优先判断，分组关系优先由多模态模型给出语义分栏框，"
+            "再由 OpenCV 将元素匹配到这些分组并计算紧密度、分离度、面积、对比和对齐等可解释指标。"
         ),
         detection_summary=DetectionSummary(
             image_width=analysis.image_width,
             image_height=analysis.image_height,
             detected_elements=len(analysis.detected_elements),
             detected_groups=len(analysis.detected_groups),
+            detected_columns=len(analysis.detected_columns),
+            grouping_strategy=analysis.grouping_strategy,
+            columns=_column_debug_payload(analysis),
+            groups=_group_debug_payload(analysis),
             llm_used=llm_used,
             llm_provider=settings.resolved_provider(),
             llm_transport=llm_transport,
