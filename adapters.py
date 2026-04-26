@@ -8,17 +8,26 @@ from typing import Protocol
 from openai import OpenAI
 
 from config import Settings
-from prompts import SYSTEM_PROMPT, build_font_hierarchy_user_prompt
-from schemas import get_font_hierarchy_schema_dict
+from prompts import (
+    SEMANTIC_GROUPING_SYSTEM_PROMPT,
+    SYSTEM_PROMPT,
+    build_font_hierarchy_user_prompt,
+    build_semantic_grouping_user_prompt,
+)
+from schemas import get_font_hierarchy_schema_dict, get_semantic_grouping_schema_dict
 
 
-JSON_SCHEMA = get_font_hierarchy_schema_dict()
+FONT_JSON_SCHEMA = get_font_hierarchy_schema_dict()
+SEMANTIC_GROUPING_JSON_SCHEMA = get_semantic_grouping_schema_dict()
 
 
 class FontHierarchyEvaluator(Protocol):
     transport_name: str
 
     def evaluate_font_hierarchy(self, image_path: str) -> str:
+        ...
+
+    def evaluate_semantic_grouping(self, image_path: str) -> str:
         ...
 
 
@@ -86,8 +95,38 @@ class OpenAIResponsesFontHierarchyAdapter:
             text={
                 "format": {
                     "type": "json_schema",
-                    "name": JSON_SCHEMA["name"],
-                    "schema": JSON_SCHEMA["schema"],
+                    "name": FONT_JSON_SCHEMA["name"],
+                    "schema": FONT_JSON_SCHEMA["schema"],
+                    "strict": True,
+                }
+            },
+        )
+        return _require_text_output(getattr(response, "output_text", None), "Responses API")
+
+    def evaluate_semantic_grouping(self, image_path: str) -> str:
+        image_name = Path(image_path).name
+        data_url = encode_image_to_data_url(image_path)
+
+        response = self.client.responses.create(
+            model=self.settings.model,
+            input=[
+                {
+                    "role": "system",
+                    "content": [{"type": "input_text", "text": SEMANTIC_GROUPING_SYSTEM_PROMPT}],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": build_semantic_grouping_user_prompt(image_name)},
+                        {"type": "input_image", "image_url": data_url},
+                    ],
+                },
+            ],
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": SEMANTIC_GROUPING_JSON_SCHEMA["name"],
+                    "schema": SEMANTIC_GROUPING_JSON_SCHEMA["schema"],
                     "strict": True,
                 }
             },
@@ -119,6 +158,32 @@ class OpenAICompatibleChatFontHierarchyAdapter:
                     "role": "user",
                     "content": [
                         {"type": "text", "text": build_font_hierarchy_user_prompt(image_name)},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                },
+            ],
+        )
+
+        content = completion.choices[0].message.content
+        return _require_text_output(content, "Chat Completions API")
+
+    def evaluate_semantic_grouping(self, image_path: str) -> str:
+        image_name = Path(image_path).name
+        data_url = encode_image_to_data_url(image_path)
+
+        completion = self.client.chat.completions.create(
+            model=self.settings.model,
+            temperature=0.1,
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "system",
+                    "content": SEMANTIC_GROUPING_SYSTEM_PROMPT,
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": build_semantic_grouping_user_prompt(image_name)},
                         {"type": "image_url", "image_url": {"url": data_url}},
                     ],
                 },

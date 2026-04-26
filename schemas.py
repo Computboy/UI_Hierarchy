@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 TASK_NAME = "ui_hierarchy_evaluation"
 FONT_TASK_NAME = "font_hierarchy_delta_assessment"
+SEMANTIC_GROUPING_TASK_NAME = "semantic_grouping_assessment"
 
 DIMENSION_ORDER = [
     "visual_saliency_difference",
@@ -99,6 +100,10 @@ class DetectionSummary(StrictBaseModel):
     image_height: int = Field(..., gt=0)
     detected_elements: int = Field(..., ge=0)
     detected_groups: int = Field(..., ge=0)
+    detected_columns: int = Field(default=0, ge=0)
+    grouping_strategy: str = Field(default="unknown", min_length=1)
+    columns: list[dict[str, Any]] = Field(default_factory=list)
+    groups: list[dict[str, Any]] = Field(default_factory=list)
     llm_used: bool
     llm_provider: str | None = None
     llm_transport: str | None = None
@@ -143,6 +148,29 @@ class FontHierarchyAssessment(StrictBaseModel):
     image_name: str = Field(..., min_length=1)
     confidence: Literal["low", "medium", "high"]
     font_hierarchy_delta: FontHierarchyDimension
+
+
+class SemanticGroupBox(StrictBaseModel):
+    label: str = Field(..., min_length=2)
+    role: str = Field(..., min_length=2)
+    x: float = Field(..., ge=0, le=1)
+    y: float = Field(..., ge=0, le=1)
+    w: float = Field(..., gt=0, le=1)
+    h: float = Field(..., gt=0, le=1)
+
+
+class SemanticGroupingAssessment(StrictBaseModel):
+    task: Literal[SEMANTIC_GROUPING_TASK_NAME]
+    image_name: str = Field(..., min_length=1)
+    confidence: Literal["low", "medium", "high"]
+    groups: list[SemanticGroupBox] = Field(..., min_length=2, max_length=16)
+
+    @model_validator(mode="after")
+    def validate_boxes(self) -> "SemanticGroupingAssessment":
+        for group in self.groups:
+            if group.x + group.w > 1.03 or group.y + group.h > 1.03:
+                raise ValueError("Semantic group boxes must stay within the normalized image bounds.")
+        return self
 
 
 def get_font_hierarchy_schema_dict() -> Dict[str, Any]:
@@ -195,6 +223,50 @@ def get_font_hierarchy_schema_dict() -> Dict[str, Any]:
                 },
             },
             "required": ["task", "image_name", "confidence", "font_hierarchy_delta"],
+        },
+        "strict": True,
+    }
+
+
+def get_semantic_grouping_schema_dict() -> Dict[str, Any]:
+    return {
+        "name": SEMANTIC_GROUPING_TASK_NAME,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "const": SEMANTIC_GROUPING_TASK_NAME,
+                },
+                "image_name": {
+                    "type": "string",
+                    "minLength": 1,
+                },
+                "confidence": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high"],
+                },
+                "groups": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 16,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "label": {"type": "string", "minLength": 2},
+                            "role": {"type": "string", "minLength": 2},
+                            "x": {"type": "number", "minimum": 0, "maximum": 1},
+                            "y": {"type": "number", "minimum": 0, "maximum": 1},
+                            "w": {"type": "number", "minimum": 0.001, "maximum": 1},
+                            "h": {"type": "number", "minimum": 0.001, "maximum": 1},
+                        },
+                        "required": ["label", "role", "x", "y", "w", "h"],
+                    },
+                },
+            },
+            "required": ["task", "image_name", "confidence", "groups"],
         },
         "strict": True,
     }
