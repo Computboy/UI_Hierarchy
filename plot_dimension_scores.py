@@ -95,16 +95,39 @@ def add_summary_box(fig, records, score_matrix, batch_dir: Path):
         },
     )
 
+def to_percentile_matrix(raw_matrix):
+    percentile_matrix = np.zeros_like(raw_matrix, dtype=float)
+
+    for j in range(raw_matrix.shape[1]):
+        values = raw_matrix[:, j]
+        order = np.argsort(values)
+        ranks = np.empty_like(order, dtype=float)
+
+        # rank 从 1 到 n
+        ranks[order] = np.arange(1, len(values) + 1)
+
+        percentile_matrix[:, j] = ranks / len(values) * 100
+
+    return percentile_matrix
+
 
 def plot_heatmap(records, batch_dir: Path, output_path: Path, dpi: int):
-    score_matrix = build_score_matrix(records)
+    raw_matrix = build_score_matrix(records)
     labels = [item['platform'] for item in records]
     dim_labels = [label for _, label in DIMENSIONS]
+
+    percentile_matrix = to_percentile_matrix(raw_matrix)
 
     fig_h = max(8, len(records) * 0.34 + 2.2)
     fig, ax = plt.subplots(figsize=(10.5, fig_h), facecolor='white')
 
-    im = ax.imshow(score_matrix, aspect='auto', vmin=0, vmax=10, cmap='YlGnBu')
+    im = ax.imshow(
+        percentile_matrix,
+        aspect='auto',
+        vmin=0,
+        vmax=100,
+        cmap='YlGnBu'
+    )
 
     ax.set_xticks(np.arange(len(dim_labels)))
     ax.set_xticklabels(dim_labels, fontsize=11)
@@ -119,25 +142,46 @@ def plot_heatmap(records, batch_dir: Path, output_path: Path, dpi: int):
     ax.grid(which='minor', color='white', linestyle='-', linewidth=1.2)
     ax.tick_params(which='minor', bottom=False, left=False)
 
-    for i in range(score_matrix.shape[0]):
-        for j in range(score_matrix.shape[1]):
-            value = score_matrix[i, j]
-            text_color = 'white' if value >= 6.2 else '#243B53'
-            ax.text(j, i, f'{value:.1f}', ha='center', va='center', fontsize=8.5, color=text_color)
+    for i in range(percentile_matrix.shape[0]):
+        for j in range(percentile_matrix.shape[1]):
+            value = percentile_matrix[i, j]
+            text_color = 'white' if value >= 60 else '#243B53'
 
-    ax.set_title('界面层次结构三维度评分热力图', fontsize=18, fontweight='bold', pad=18)
+            ax.text(
+                j,
+                i,
+                f'{value:.0f}',
+                ha='center',
+                va='center',
+                fontsize=8.5,
+                color=text_color
+            )
+
+    ax.set_title('界面层次结构三维度样本内百分位热力图', fontsize=18, fontweight='bold', pad=18)
     ax.set_xlabel('评分维度', fontsize=12, fontweight='bold', labelpad=10)
     ax.set_ylabel('界面样本', fontsize=12, fontweight='bold', labelpad=10)
 
     cbar = fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
-    cbar.set_label('分数', fontsize=11)
+    cbar.set_label('样本内百分位', fontsize=11)
 
-    add_summary_box(fig, records, score_matrix, batch_dir)
-    fig.subplots_adjust(left=0.28, right=0.92, top=0.90, bottom=0.06)
+    add_summary_box(fig, records, raw_matrix, batch_dir)
+
+    fig.text(
+        0.50,
+        0.025,
+        '注：图中数值表示页面在对应维度中的样本内百分位。数值越高，表示该页面在该维度上相较同批次样本表现越突出。',
+        ha='center',
+        va='bottom',
+        fontsize=9.5,
+        color='#475467'
+    )
+
+    fig.subplots_adjust(left=0.28, right=0.92, top=0.90, bottom=0.08)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=dpi, bbox_inches='tight')
     plt.close(fig)
+
 
 
 def plot_barh(records, batch_dir: Path, output_path: Path, dpi: int):
