@@ -39,6 +39,13 @@ SALIENCY_WEIGHTS = {
 }
 
 
+DIMENSION_WEIGHTS = {
+    "visual_saliency_difference": 0.35,
+    "grouping_compactness_separation": 0.35,
+    "alignment_consistency": 0.30,
+}
+
+
 DIMENSION_EFFECTS = {
     "visual_saliency_difference": "用户很难快速分辨第一层与第二层信息",
     "grouping_compactness_separation": "用户不容易判断哪些元素属于同一信息模块",
@@ -381,7 +388,10 @@ def evaluate_ui_hierarchy(image_path: str, settings: Settings) -> tuple[UIHierar
         ),
     }
 
-    overall_score = round(mean(dimension.score for dimension in result_dimensions.values()), 1)
+    overall_score = _weighted_score(
+        {key: dimension.score for key, dimension in result_dimensions.items()},
+        DIMENSION_WEIGHTS,
+    )
 
     llm_runtime = (
         f"provider={settings.resolved_provider()}, "

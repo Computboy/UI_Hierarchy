@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from statistics import mean
+from statistics import mean, median
 from typing import Any
 
 try:
@@ -106,6 +106,17 @@ def _score_lower_better(value: float, best: float, worst: float) -> float:
         return 5.5
     ratio = _clamp01((worst - value) / (worst - best))
     return _round_score(1 + ratio * 9)
+
+
+def _robust_center(values: list[float], default: float = 0.0) -> float:
+    if not values:
+        return default
+    ordered = sorted(values)
+    if len(ordered) < 5:
+        return float(median(ordered))
+    trim = max(1, int(len(ordered) * 0.1))
+    trimmed = ordered[trim:-trim] or ordered
+    return float(median(trimmed))
 
 
 def _describe_score(score: float, good: str, medium: str, weak: str) -> str:
@@ -550,60 +561,73 @@ def _build_grouping_metrics(
 ) -> dict[str, LocalMetricMeasurement]:
     diag = math.hypot(image_width, image_height)
     within_distances: list[float] = []
+    within_edge_distances: list[float] = []
     compactness_values: list[float] = []
+    content_group_boxes: list[BoundingBox] = []
 
     for group in groups:
         member_boxes = [elements[index] for index in group.member_indices]
+        if member_boxes:
+            content_group_boxes.append(_union_boxes(member_boxes))
         if len(member_boxes) >= 2:
+            content_box = _union_boxes(member_boxes)
+            group_diag = math.hypot(content_box.w, content_box.h)
             for box in member_boxes:
-                distances = [
+                center_distances = [
                     math.hypot(box.center_x - other.center_x, box.center_y - other.center_y)
                     for other in member_boxes
                     if other is not box
                 ]
-                if distances:
-                    within_distances.append(min(distances) / max(diag, 1.0))
+                edge_distances = [
+                    _bbox_distance(box, other) / max(diag, 1.0)
+                    for other in member_boxes
+                    if other is not box
+                ]
+                if center_distances:
+                    within_distances.append(min(center_distances) / max(group_diag, 1.0))
+                if edge_distances:
+                    within_edge_distances.append(min(edge_distances))
 
-            group_diag = math.hypot(group.box.w, group.box.h)
             center_distances = [
-                math.hypot(box.center_x - group.box.center_x, box.center_y - group.box.center_y)
+                math.hypot(box.center_x - content_box.center_x, box.center_y - content_box.center_y)
                 for box in member_boxes
             ]
             compactness_values.append(
-                max(0.0, 1.0 - min(1.0, mean(center_distances) / max(group_diag * 0.45, 1.0)))
+                max(0.0, 1.0 - min(1.0, _robust_center(center_distances) / max(group_diag * 0.6, 1.0)))
             )
 
     between_distances: list[float] = []
-    for index, group in enumerate(groups):
+    for index, group_box in enumerate(content_group_boxes):
         distances = [
-            _bbox_distance(group.box, other.box) / max(diag, 1.0)
-            for other_index, other in enumerate(groups)
+            _bbox_distance(group_box, other_box) / max(diag, 1.0)
+            for other_index, other_box in enumerate(content_group_boxes)
             if other_index != index
         ]
         if distances:
             between_distances.append(min(distances))
 
-    within_mean = float(mean(within_distances)) if within_distances else 0.18
-    between_mean = float(mean(between_distances)) if between_distances else 0.0
-    compactness = float(mean(compactness_values)) if compactness_values else 0.0
-    interval_ratio = between_mean / max(within_mean, 1e-4)
+    within_mean = _robust_center(within_distances, default=0.24)
+    between_mean = _robust_center(between_distances, default=0.0)
+    compactness = _robust_center(compactness_values, default=0.0)
+    within_edge = _robust_center(within_edge_distances, default=0.004)
+    interval_ratio = between_mean / max(within_edge, 0.004)
 
-    within_score = _score_lower_better(within_mean, best=0.02, worst=0.15)
-    between_score = _score_higher_better(between_mean, worst=0.01, best=0.12)
-    compactness_score = _score_higher_better(compactness, worst=0.12, best=0.78)
-    interval_ratio_score = _score_higher_better(interval_ratio, worst=0.8, best=3.0)
+    within_score = _score_lower_better(within_mean, best=0.04, worst=0.24)
+    between_score = _score_higher_better(between_mean, worst=0.0, best=0.06)
+    compactness_score = _score_higher_better(compactness, worst=0.15, best=0.70)
+    interval_ratio_score = _score_higher_better(interval_ratio, worst=0.70, best=4.0)
 
     return {
         "within_group_distance_mean": LocalMetricMeasurement(
             key="within_group_distance_mean",
-            label="组内距离均值",
+            label="组内距离稳健值",
             method="opencv",
             raw_value=round(within_mean, 4),
-            unit="diag_ratio",
+            unit="group_diag_ratio",
             normalized_score=within_score,
-            formula="同组元素最近邻距离均值 / 图像对角线",
+            formula="同组元素最近邻中心距离的稳健中位值 / 所在组真实包围框对角线",
             interpretation=(
-                f"组内最近邻距离均值约为画面对角线的 {within_mean:.3f}，"
+                f"组内最近邻中心距离稳健值约为所在组对角线的 {within_mean:.3f}，"
                 + _describe_score(
                     within_score,
                     "同组元素彼此靠近。",
@@ -614,14 +638,14 @@ def _build_grouping_metrics(
         ),
         "between_group_distance_mean": LocalMetricMeasurement(
             key="between_group_distance_mean",
-            label="组间距离均值",
+            label="组间距离稳健值",
             method="opencv",
             raw_value=round(between_mean, 4),
             unit="diag_ratio",
             normalized_score=between_score,
-            formula="各分组最近边界距离均值 / 图像对角线",
+            formula="各分组真实包围框最近边界距离的稳健中位值 / 图像对角线",
             interpretation=(
-                f"组间最近边界距离均值约为画面对角线的 {between_mean:.3f}，"
+                f"组间最近边界距离稳健值约为画面对角线的 {between_mean:.3f}，"
                 + _describe_score(
                     between_score,
                     "不同分组之间留白较清楚。",
@@ -637,7 +661,7 @@ def _build_grouping_metrics(
             raw_value=round(compactness, 4),
             unit="0_1",
             normalized_score=compactness_score,
-            formula="1 - 组内元素到组中心平均距离 / 组包围框对角线",
+            formula="1 - 组内元素到真实组中心距离的稳健中位值 / 组包围框对角线",
             interpretation=(
                 f"空间聚类紧凑度约为 {compactness:.2f}，"
                 + _describe_score(
@@ -655,7 +679,7 @@ def _build_grouping_metrics(
             raw_value=round(interval_ratio, 4),
             unit="ratio",
             normalized_score=interval_ratio_score,
-            formula="组间距离均值 / 组内距离均值",
+            formula="组间真实边界距离稳健值 / 组内元素边界距离稳健值",
             interpretation=(
                 f"分组间隔比约为 {interval_ratio:.2f}，"
                 + _describe_score(
