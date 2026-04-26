@@ -1,116 +1,274 @@
+import argparse
 import json
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.patches import Patch
+
 
 # 设置中文字体，避免中文显示为方框
-plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS']  # 支持中文
-plt.rcParams['axes.unicode_minus'] = False  # 正常显示负号
+plt.rcParams["font.sans-serif"] = ["SimHei", "Microsoft YaHei", "Arial Unicode MS"]
+plt.rcParams["axes.unicode_minus"] = False
 
-def extract_display_name(image_name):
+
+def extract_display_name(image_name: str) -> str:
     """
     从 image_name 中提取用于展示的平台名称。
-    例如：'01_CSDN.png' -> 'CSDN', '02_知乎.png' -> '知乎'
+    例如：
+    '01_CSDN.png' -> 'CSDN'
+    '02_知乎.png' -> '知乎'
     """
-    # 移除 .png 后缀
-    base = image_name.replace('.png', '')
-    # 按下划线拆分，取第二部分（索引1），若没有下划线则取整个名称
-    parts = base.split('_')
-    if len(parts) >= 2:
-        return parts[1]
-    else:
-        return parts[0]
+    base = Path(image_name).stem
+    parts = base.split("_")
 
-def plot_scores(json_file_path, output_image='scores_bar_chart.png'):
+    if len(parts) >= 2:
+        return "_".join(parts[1:])
+
+    return parts[0]
+
+
+def load_batch_summary(json_file_path: Path):
     """
-    读取 JSON 文件，生成评分柱状图并保存/显示。
-    
-    参数:
-        json_file_path (str): JSON 文件路径
-        output_image (str): 输出图片文件名，默认 'scores_bar_chart.png'
+    读取 batch_summary.json。
     """
-    # 1. 加载 JSON 数据
     try:
-        with open(json_file_path, 'r', encoding='utf-8') as f:
+        with json_file_path.open("r", encoding="utf-8") as f:
             data = json.load(f)
     except FileNotFoundError:
-        print(f"错误：文件 {json_file_path} 未找到。")
-        return
+        raise FileNotFoundError(f"错误：文件未找到：{json_file_path}")
     except json.JSONDecodeError:
-        print(f"错误：文件 {json_file_path} 不是有效的 JSON 格式。")
-        return
+        raise ValueError(f"错误：文件不是有效 JSON 格式：{json_file_path}")
 
-    # 2. 提取数据：平台名称、评分、置信度
+    if not isinstance(data, list):
+        raise ValueError("错误：batch_summary.json 顶层结构应为 list。")
+
+    return data
+
+
+def plot_scores(
+    json_file_path: str | Path,
+    output_image: str | Path = "web_platform_scores.png",
+    top_n: int | None = None,
+    dpi: int = 300,
+    show: bool = False,
+):
+    """
+    读取 batch_summary.json，生成横向整体评分条形图。
+
+    参数:
+        json_file_path: batch_summary.json 路径
+        output_image: 输出图片路径或文件名
+        top_n: 仅展示前 N 个样本；None 表示全部展示
+        dpi: 图片分辨率
+        show: 是否弹出显示图片窗口
+    """
+    json_file_path = Path(json_file_path)
+    data = load_batch_summary(json_file_path)
+
     platforms = []
     scores = []
     confidences = []
-    for item in data:
-        name = extract_display_name(item['image_name'])
-        platforms.append(name)
-        scores.append(item['overall_score'])
-        confidences.append(item['confidence'])  # 'high' 或 'medium'
 
-    # 3. 按评分降序排序（从高到低），便于观察优劣
-    sorted_indices = np.argsort(scores)[::-1]  # 降序索引
+    for item in data:
+        if "image_name" not in item or "overall_score" not in item:
+            continue
+
+        platforms.append(extract_display_name(item["image_name"]))
+        scores.append(float(item["overall_score"]))
+        confidences.append(item.get("confidence", "unknown"))
+
+    if not platforms:
+        raise ValueError("错误：未从 batch_summary.json 中读取到有效评分数据。")
+
+    sorted_indices = np.argsort(scores)[::-1]
+
     platforms_sorted = [platforms[i] for i in sorted_indices]
     scores_sorted = [scores[i] for i in sorted_indices]
     confidences_sorted = [confidences[i] for i in sorted_indices]
 
-    # 4. 设置柱状图颜色：根据置信度（high -> 绿色, medium -> 橙色, low -> 红色）
+    if top_n is not None and top_n > 0:
+        platforms_sorted = platforms_sorted[:top_n]
+        scores_sorted = scores_sorted[:top_n]
+        confidences_sorted = confidences_sorted[:top_n]
+
     color_map = {
-        'high': "#68b2eb",   # 鲜绿色
-        'medium': '#ff7f0e', # 橙色
-        'low': '#d62728'     # 红色
+        "high": "#68b2eb",
+        "medium": "#ff7f0e",
+        "low": "#d62728",
+        "unknown": "#8E9AAF",
     }
-    bar_colors = [color_map.get(conf, '#1f77b4') for conf in confidences_sorted]
 
-    # 5. 创建图形
-    plt.figure(figsize=(12, 7))
-    bars = plt.bar(platforms_sorted, scores_sorted, color=bar_colors, alpha=0.85, edgecolor='black', linewidth=0.5)
+    bar_colors = [color_map.get(conf, color_map["unknown"]) for conf in confidences_sorted]
 
-    # 6. 在柱顶添加数值标签
+    # 根据样本数量动态调整高度
+    fig_h = max(8, len(platforms_sorted) * 0.38 + 2.5)
+    fig, ax = plt.subplots(figsize=(11, fig_h), facecolor="white")
+
+    y = np.arange(len(platforms_sorted))
+
+    bars = ax.barh(
+        y,
+        scores_sorted,
+        color=bar_colors,
+        alpha=0.88,
+        edgecolor="black",
+        linewidth=0.45,
+    )
+
+    ax.set_yticks(y)
+    ax.set_yticklabels(platforms_sorted, fontsize=9)
+    ax.invert_yaxis()
+
+    # 数值标签
     for bar, score in zip(bars, scores_sorted):
-        plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.1,
-                 f'{score:.1f}', ha='center', va='bottom', fontsize=10, fontweight='bold')
+        ax.text(
+            bar.get_width() + 0.08,
+            bar.get_y() + bar.get_height() / 2,
+            f"{score:.1f}",
+            ha="left",
+            va="center",
+            fontsize=9,
+            fontweight="bold",
+            color="#1F2937",
+        )
 
-    # 7. 添加平均分参考线
-    avg_score = np.mean(scores_sorted)
-    plt.axhline(y=avg_score, color='red', linestyle='--', linewidth=1.2, alpha=0.7, label=f'平均分: {avg_score:.2f}')
+    avg_score = float(np.mean(scores_sorted))
+    ax.axvline(
+        x=avg_score,
+        color="red",
+        linestyle="--",
+        linewidth=1.2,
+        alpha=0.75,
+        label=f"平均分: {avg_score:.2f}",
+    )
 
-    # 8. 添加图例（置信度颜色说明）
-    from matplotlib.patches import Patch
     legend_elements = [
-        Patch(facecolor=color_map['high'], edgecolor='black', label='高置信度'),
-        Patch(facecolor=color_map['medium'], edgecolor='black', label='中置信度')
+        Patch(facecolor=color_map["high"], edgecolor="black", label="高置信度"),
+        Patch(facecolor=color_map["medium"], edgecolor="black", label="中置信度"),
     ]
-    # 如果数据中有低置信度，可以取消下面注释
-    # if any(c == 'low' for c in confidences_sorted):
-    #     legend_elements.append(Patch(facecolor=color_map['low'], edgecolor='black', label='低置信度'))
 
-    plt.legend(handles=legend_elements, loc='upper right', fontsize=10)
+    if any(conf == "low" for conf in confidences_sorted):
+        legend_elements.append(
+            Patch(facecolor=color_map["low"], edgecolor="black", label="低置信度")
+        )
 
-    # 9. 图表装饰
-    plt.title('各平台 UI/UX 整体评分对比', fontsize=16, fontweight='bold', pad=20)
-    plt.xlabel('平台名称', fontsize=12, labelpad=10)
-    plt.ylabel('整体评分 (overall_score)', fontsize=12, labelpad=10)
-    plt.ylim(0, 10)  # 评分范围 0-10，可根据实际调整
-    plt.xticks(rotation=30, ha='right', fontsize=10)
-    plt.yticks(np.arange(0, 10.5, 0.5), fontsize=9)
-    plt.grid(axis='y', linestyle=':', alpha=0.6)
+    if any(conf not in {"high", "medium", "low"} for conf in confidences_sorted):
+        legend_elements.append(
+            Patch(facecolor=color_map["unknown"], edgecolor="black", label="未知置信度")
+        )
 
-    # 10. 添加数据来源或备注
-    plt.figtext(0.99, 0.01, '数据来源：批量评估结果 (batch_summary.json)', 
-                ha='right', va='bottom', fontsize=8, style='italic', alpha=0.6)
+    ax.legend(handles=legend_elements, loc="lower right", fontsize=10, frameon=False)
 
-    # 11. 调整布局，避免标签被截断
-    plt.tight_layout()
+    ax.set_title("各平台 UI/UX 整体评分对比", fontsize=17, fontweight="bold", pad=18)
+    ax.set_xlabel("整体评分（overall_score）", fontsize=12, labelpad=10)
+    ax.set_ylabel("平台名称", fontsize=12, labelpad=10)
 
-    # 12. 保存图片（可选）并显示
-    plt.savefig(output_image, dpi=300, bbox_inches='tight')
-    print(f"图表已保存为: {output_image}")
-    plt.show()
+    ax.set_xlim(0, 10.8)
+    ax.set_xticks(np.arange(0, 10.5, 0.5))
+    ax.tick_params(axis="x", labelsize=9)
+    ax.grid(axis="x", linestyle=":", alpha=0.55)
+    ax.set_axisbelow(True)
 
-# 使用示例（请根据实际文件路径修改）
+    for spine in ["top", "right"]:
+        ax.spines[spine].set_visible(False)
+
+    fig.text(
+        0.99,
+        0.01,
+        "数据来源：批量评估结果（batch_summary.json）",
+        ha="right",
+        va="bottom",
+        fontsize=8,
+        style="italic",
+        alpha=0.6,
+    )
+
+    fig.tight_layout(rect=[0, 0.02, 1, 1])
+
+    output_path = Path(output_image)
+
+    # 如果 output_image 只是文件名，则默认保存到 JSON 所在目录
+    if not output_path.is_absolute() and output_path.parent == Path("."):
+        output_path = json_file_path.parent / output_path
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    print(f"图表已保存为: {output_path}")
+
+    if show:
+        plt.show()
+
+    plt.close(fig)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="读取 batch_summary.json，生成整体评分横向条形图。"
+    )
+
+    parser.add_argument(
+        "--batch-dir",
+        required=True,
+        help="批次输出目录，例如 outputs/batch_20260426_203835",
+    )
+
+    parser.add_argument(
+        "--output",
+        default="web_platform_scores.png",
+        help="输出图片文件名或完整路径。若只写文件名，则默认保存到 batch 目录下。",
+    )
+
+    parser.add_argument(
+        "--top-n",
+        type=int,
+        default=None,
+        help="仅展示评分最高的前 N 个样本。默认展示全部样本。",
+    )
+
+    parser.add_argument(
+        "--dpi",
+        type=int,
+        default=300,
+        help="导出图片分辨率，默认 300。",
+    )
+
+    parser.add_argument(
+        "--show",
+        action="store_true",
+        help="生成后弹出显示图片窗口。默认不弹出。",
+    )
+
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+
+    batch_dir = Path(args.batch_dir)
+    json_file = batch_dir / "batch_summary.json"
+
+    if not batch_dir.exists():
+        raise FileNotFoundError(f"批次目录不存在：{batch_dir}")
+
+    if not json_file.exists():
+        raise FileNotFoundError(f"未找到 batch_summary.json：{json_file}")
+
+    output_path = Path(args.output)
+
+    # 如果只传文件名，就自动保存到 batch 文件夹下
+    if not output_path.is_absolute() and output_path.parent == Path("."):
+        output_path = batch_dir / output_path
+
+    plot_scores(
+        json_file_path=json_file,
+        output_image=output_path,
+        top_n=args.top_n,
+        dpi=args.dpi,
+        show=args.show,
+    )
+
+
 if __name__ == "__main__":
-    # 假设 JSON 文件名为 'batch_summary.json'，位于当前目录
-    json_file = "outputs/batch_20260426_183904/batch_summary.json"
-    plot_scores(json_file, output_image="web_platform_scores.png")
+    main()

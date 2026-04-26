@@ -110,7 +110,6 @@ def to_percentile_matrix(raw_matrix):
 
     return percentile_matrix
 
-
 def plot_heatmap(records, batch_dir: Path, output_path: Path, dpi: int):
     raw_matrix = build_score_matrix(records)
     labels = [item['platform'] for item in records]
