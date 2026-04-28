@@ -1,6 +1,6 @@
-# UI Hierarchy 混合评估系统
+# UI Hierarchy-Clarity 混合评估系统
 
-基于 **OpenCV 计算机视觉 + 多模态大模型** 的 UI 截图视觉层级质量评估工具。
+基于 **OpenCV 计算机视觉 + 多模态大模型** 的 UI 截图**视觉层级清晰度**质量评估工具。
 
 从面积、对比、间距、聚类、对齐等可解释指标出发，结合多模态模型对字体层级的判断，将 UI 截图的视觉层级量化为三个维度的 1–10 分评分，并附带证据与改进建议。
 
@@ -38,7 +38,7 @@
 pip install -r requirements.txt
 ```
 
-依赖项：`openai`、`python-dotenv`、`pydantic`、`pillow`、`matplotlib`、`opencv-python-headless`、`numpy` 等。
+依赖项：`opencv-python-headless`、`numpy`、`openai`、`pydantic`、`pillow`、`matplotlib`、`python-dotenv`。
 
 ### 2. 配置环境变量
 
@@ -56,7 +56,7 @@ UI_HIERARCHY_ENABLE_MLLM=true
 | 变量 | 说明 |
 |---|---|
 | `OPENAI_API_KEY` | API 密钥（启用多模态模型时必填） |
-| `OPENAI_BASE_URL` | API 端点地址 |
+| `OPENAI_BASE_URL` | API 端点地址，支持 OpenAI 官方或兼容接口 |
 | `UI_EVAL_PROVIDER` | 提供商模式：`auto` / `openai_responses` / `openai_compatible_chat` |
 | `UI_EVAL_MODEL` | 模型名称 |
 | `UI_EVAL_OUTPUT_DIR` | 输出目录 |
@@ -70,7 +70,7 @@ UI_HIERARCHY_ENABLE_MLLM=true
 python app.py --image input/01_CSDN.png
 ```
 
-**批量评估 input/ 目录下的所有截图：**
+**批量评估 `input/` 目录下的所有截图：**
 
 ```bash
 python app.py --all-input
@@ -113,7 +113,7 @@ python plot_dimension_scores.py --batch-dir outputs/batch_20260412_142235 --styl
 python plot_dimension_scores.py --batch-dir outputs/batch_20260412_142235 --style barh
 ```
 
-支持 `--sort-by`（overall/visual/grouping/alignment）、`--top-n`、`--dpi` 等参数。
+支持 `--sort-by`（overall / visual / grouping / alignment）、`--top-n`、`--dpi` 等参数。
 
 ### 总体评分对比柱状图
 
@@ -160,4 +160,4 @@ python visualize_scores.py
 
 ## License
 
-本项目为课程学习用途，仅供学术参考。最终解释权归作者本人所有。
+本项目为课程学习用途，仅供学术参考。
